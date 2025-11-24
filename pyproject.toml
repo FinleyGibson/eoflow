@@ -9,3 +9,9 @@ dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.2.0",
+    "pytest>=9.0.1",
+]
