@@ -24,6 +24,9 @@ Pipeline for modeling water quality form Earth Observation data.
                 - [ ] Define Area of interest (AOI)
                     - [ ] Watershed delineation
                 - [ ] Get geo tif mask of river networks
+                    - [ ] [HydroSHEDS](https://www.hydrosheds.org/hydrosheds-core-downloads)
+                        - [ ] Downsample to AOI
+                        - [ ] Render visualisation of
                     - [ ] Use open source maps for this?
                         - [x] [HydroSHEDS](https://www.hydrosheds.org/hydrosheds-core-downloads)
                             - [x] Downsample to AOI
