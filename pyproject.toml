@@ -14,9 +14,23 @@ dependencies = [
     "fastapi>=0.128.0",
     "folium>=0.20.0",
     "geopandas>=1.1.1",
+    "leaflet>=0.0.3",
+    "leafmap>=0.57.9",
+    "localtileserver>=0.10.6",
     "matplotlib>=3.10.3",
     "numpy>=2.2.6",
     "pandas>=2.2.3",
+    "rasterio>=1.4.3",
+    "setuptools>=80.9.0",
+    "xarray>=2025.7.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipykernel>=6.29.5",
+    "ipython>=8.12.0",
+    "pytest>=8.0.0",
+    "jupyterlab>=4.4.3",
 ]
 
 [project.scripts]
@@ -24,8 +38,8 @@ eoflow-update-config = "scripts.update_config:main"
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/eoflow", "scripts"]
@@ -41,3 +55,6 @@ dev = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+
+[tool.setuptools.packages.find]
+where = ["src"]
