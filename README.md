@@ -21,15 +21,19 @@ Pipeline for modeling water quality form Earth Observation data.
     - [ ] Graph Gaussian process
         - [ ] Produce directional graph
             - [ ] Extract River Network as a Graph
-                - [ ] Define Area of interest (AOI)
-                    - [ ] Watershed delineation
+                - [x] Define Area of interest (AOI)
+                    - [x] Watershed delineation
                 - [ ] Get geo tif mask of river networks
-                    - [ ] Use open source maps for this?
+                    - [x] Use open source maps for this?
                         - [x] [HydroSHEDS](https://www.hydrosheds.org/hydrosheds-core-downloads)
                             - [x] Downsample to AOI
                             - [x] Render visualisation of
+                        - [x] [openStreetMap]()
+                            - [x] Downsample to AOI
+                            - [x] Render visualisation of
                     - [ ] Use thresholded NDVI data to produce Mask
-                - [ ] [RivGraph](https://github.com/VeinsOfTheEarth/RivGraph)
+                - [ ] Transform river networks data into graph representation
+                    - [ ] [RivGraph](https://github.com/VeinsOfTheEarth/RivGraph)
             - [ ] Add CS collection sites as sites on this graph.
         - [ ] Implement Gaussian process over Graph in accordance with [Borovitskiy Et al.](https://proceedings.mlr.press/v130/borovitskiy21a.html)
 
