@@ -1,19 +1,35 @@
 """
 River network utilities for fetching OpenStreetMap waterway data via Overpass API.
 
-This module provides `get_river_network_from_shape` which queries the Overpass API
-to retrieve river, stream, canal, and other waterway features within a boundary shape.
+This module provides functions to query the Overpass API for river/waterway data
+and build topological network graphs for analysis.
 
-Key features:
+Main Functions
+--------------
+get_river_network_from_shape(shp, ...)
+    Query Overpass API to retrieve river/stream/canal features within a boundary.
+    Returns a GeoDataFrame with LineString geometries.
+
+build_river_network_graph(gdf, ...)
+    Build a topological graph from LineString geometries where nodes are placed
+    at intersections and endpoints, with edges representing river segments.
+
+calculate_graph_length_meters(G, crs)
+    Calculate total length of a river network graph in meters using Haversine
+    formula for geographic coordinates.
+
+Key Features
+------------
 - Accepts Shapely Polygon/MultiPolygon or GeoJSON-like mapping as boundary
 - Queries Overpass with automatic retries and fallback endpoints (handles 504/5xx errors)
 - Returns GeoPandas GeoDataFrame of LineString/MultiLineString geometries (EPSG:4326)
-- Optionally returns NetworkX graph with node-level topology
+- Builds topological graphs with nodes at intersections and endpoints
+- Calculates edge lengths in meters for network analysis
 
 Usage Examples
 --------------
 
-Basic usage with a bounding box::
+Fetching river network data::
 
     from shapely.geometry import box
     from eoflow.rivers import get_river_network_from_shape
@@ -25,39 +41,36 @@ Basic usage with a bounding box::
     rivers_gdf = get_river_network_from_shape(bbox, use_bbox=True)
     print(f"Found {len(rivers_gdf)} waterway features")
 
-    # Access feature attributes
-    for idx, row in rivers_gdf.iterrows():
-        print(f"OSM ID: {row['osm_id']}, Type: {row['osm_type']}")
-        print(f"Tags: {row['tags']}")
+Building a topological network graph::
 
-With NetworkX graph for topology analysis::
-
-    # Get both GeoDataFrame and graph
-    gdf, graph = get_river_network_from_shape(
-        bbox,
-        return_graph=True,
-        use_bbox=True
+    from eoflow.rivers import (
+        get_river_network_from_shape,
+        build_river_network_graph,
+        calculate_graph_length_meters
     )
 
-    # Graph contains OSM nodes as vertices
-    print(f"Network has {graph.number_of_nodes()} nodes")
-    print(f"Network has {graph.number_of_edges()} edges")
+    # Fetch river data
+    bbox = box(-0.12, 51.50, -0.10, 51.52)
+    gdf = get_river_network_from_shape(bbox, use_bbox=True)
 
-    # Access node coordinates
-    for node_id in list(graph.nodes())[:5]:
-        x, y = graph.nodes[node_id]['x'], graph.nodes[node_id]['y']
-        print(f"Node {node_id}: ({x}, {y})")
+    # Build topological graph (nodes at intersections/endpoints)
+    G = build_river_network_graph(gdf)
+    print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
 
-Using a custom polygon::
+    # Calculate total length in meters
+    length_m = calculate_graph_length_meters(G, crs=gdf.crs)
+    print(f"Total river length: {length_m/1000:.2f} km")
 
-    from shapely.geometry import Polygon
+    # Analyze network topology
+    import networkx as nx
 
-    # Define custom polygon boundary
-    coords = [(-0.12, 51.50), (-0.10, 51.50), (-0.10, 51.52), (-0.12, 51.52)]
-    poly = Polygon(coords)
+    # Find confluences (where 3+ rivers meet)
+    confluences = [n for n, d in G.degree() if d >= 3]
+    print(f"Found {len(confluences)} confluences")
 
-    # Query with polygon (more precise than bbox)
-    gdf = get_river_network_from_shape(poly, use_bbox=False)
+    # Find connected components
+    components = list(nx.connected_components(G))
+    print(f"Network has {len(components)} connected components")
 
 Error handling::
 
@@ -77,8 +90,9 @@ Notes
   or return intermittent 502/504 errors; automatic retry with exponential backoff is implemented
 - Use `use_bbox=True` for more reliable queries with rectangular areas
 - For production use, consider adding caching (e.g., diskcache) to avoid repeated queries
-- Graph is built only from OSM ways (not relations) to preserve node-level topology
-- Edge lengths in graph are in degrees; reproject to appropriate CRS for meters
+- The topological graph is different from the OSM node-level graph - it creates nodes
+  only at meaningful locations (intersections, endpoints, confluences)
+- Edge lengths can be calculated in meters using the calculate_graph_length_meters function
 """
 from __future__ import annotations
 
@@ -444,6 +458,317 @@ def get_river_network_from_shape(
     return gdf, G
 
 
+def calculate_graph_length_meters(G: nx.Graph, crs: Any = "EPSG:4326") -> float:
+    """
+    Calculate total length of a river network graph in meters.
+
+    If the graph edge lengths are in degrees (geographic CRS), this function
+    will estimate lengths in meters using the Haversine formula.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        Graph with 'length' attribute on edges
+    crs : Any, optional
+        Coordinate reference system of the graph node coordinates.
+        If geographic (e.g., EPSG:4326), uses Haversine formula.
+        Default is "EPSG:4326".
+
+    Returns
+    -------
+    float
+        Total length in meters
+
+    Examples
+    --------
+    >>> from eoflow.rivers import get_river_network_from_shape, build_river_network_graph
+    >>> from shapely.geometry import box
+    >>> bbox = box(-0.12, 51.50, -0.10, 51.52)
+    >>> gdf = get_river_network_from_shape(bbox, use_bbox=True)
+    >>> G = build_river_network_graph(gdf)
+    >>> length_m = calculate_graph_length_meters(G)
+    >>> print(f"Total river length: {length_m:.2f} meters")
+    """
+    from math import atan2, cos, radians, sin, sqrt
+
+    # Check if CRS is geographic
+    is_geographic = False
+    if isinstance(crs, str):
+        is_geographic = "4326" in crs or "WGS" in crs.upper()
+    elif hasattr(crs, "is_geographic"):
+        is_geographic = crs.is_geographic
+
+    total_length = 0.0
+
+    if is_geographic:
+        # Use Haversine formula for geographic coordinates
+        R = 6371000  # Earth radius in meters
+
+        for u, v, data in G.edges(data=True):
+            if 'length' in data:
+                # Get node coordinates
+                x1, y1 = G.nodes[u].get('x', 0), G.nodes[u].get('y', 0)
+                x2, y2 = G.nodes[v].get('x', 0), G.nodes[v].get('y', 0)
+
+                # Haversine formula
+                lat1, lon1 = radians(y1), radians(x1)
+                lat2, lon2 = radians(y2), radians(x2)
+
+                dlat = lat2 - lat1
+                dlon = lon2 - lon1
+
+                a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+                c = 2 * atan2(sqrt(a), sqrt(1 - a))
+                length_m = R * c
+
+                total_length += length_m
+    else:
+        # Assume lengths are already in meters or similar linear units
+        total_length = sum(data.get('length', 0) for u, v, data in G.edges(data=True))
+
+    return total_length
+
+
+def build_river_network_graph(
+    gdf: gpd.GeoDataFrame,
+    length_col: str = "length",
+    tolerance: float = 1e-8,
+) -> nx.Graph:
+    """
+    Build a topological graph from a GeoDataFrame of river LineString geometries.
+
+    Creates nodes at line intersections and endpoints, with edges representing
+    the river segments between nodes. This is useful for topological analysis
+    of river networks.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        GeoDataFrame with LineString or MultiLineString geometries (e.g., from get_river_network_from_shape).
+    length_col : str, default="length"
+        Name of the column to store edge lengths in the graph.
+    tolerance : float, default=1e-8
+        Coordinate tolerance for identifying identical points (in the GeoDataFrame's CRS units).
+
+    Returns
+    -------
+    nx.Graph
+        NetworkX graph where:
+        - Nodes have 'x', 'y' attributes (coordinates)
+        - Edges have 'length', 'geometry' (LineString), and 'source_idx' (original GeoDataFrame index) attributes
+
+    Examples
+    --------
+    >>> from shapely.geometry import box
+    >>> from eoflow.rivers import get_river_network_from_shape, build_river_network_graph
+    >>>
+    >>> # Get river network
+    >>> bbox = box(-0.12, 51.50, -0.10, 51.52)
+    >>> gdf = get_river_network_from_shape(bbox, use_bbox=True)
+    >>>
+    >>> # Build topological graph
+    >>> G = build_river_network_graph(gdf)
+    >>> print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+    >>>
+    >>> # Analyze network
+    >>> import networkx as nx
+    >>> # Find connected components
+    >>> components = list(nx.connected_components(G))
+    >>> print(f"Network has {len(components)} connected components")
+    >>>
+    >>> # Calculate total network length
+    >>> total_length = sum(G[u][v]['length'] for u, v in G.edges())
+    >>> print(f"Total network length: {total_length:.2f} units")
+
+    Notes
+    -----
+    - MultiLineString geometries are exploded into individual LineStrings
+    - Lines are split at intersection points and endpoints
+    - Coordinate precision is important - use `tolerance` to handle floating point errors
+    - For geographic coordinates (EPSG:4326), consider reprojecting to a projected CRS
+      for more accurate length calculations in meters
+    """
+    from shapely.geometry import LineString
+
+    # Explode MultiLineStrings into individual LineStrings
+    exploded = gdf.explode(index_parts=False).reset_index(drop=True)
+
+    # Filter to only LineString geometries
+    line_gdf = exploded[exploded.geometry.type == "LineString"].copy()
+
+    if len(line_gdf) == 0:
+        logger.warning("No LineString geometries found in GeoDataFrame")
+        return nx.Graph()
+
+    logger.info(f"Processing {len(line_gdf)} LineStrings to build network graph")
+
+    # Step 1: Find all potential node locations (endpoints and intersections)
+    node_coords = set()
+
+    # Add all endpoints
+    for idx, row in line_gdf.iterrows():
+        geom = row.geometry
+        if geom and not geom.is_empty:
+            coords = list(geom.coords)
+            if len(coords) >= 2:
+                # Add start and end points
+                node_coords.add(coords[0])
+                node_coords.add(coords[-1])
+
+    # Step 2: Find intersections between lines
+    # This is computationally expensive for large datasets, so we use spatial index
+    sindex = line_gdf.sindex
+
+    for idx, row in line_gdf.iterrows():
+        geom = row.geometry
+        if not geom or geom.is_empty:
+            continue
+
+        # Find candidate intersecting lines using spatial index
+        possible_matches_idx = list(sindex.intersection(geom.bounds))
+        possible_matches = line_gdf.iloc[possible_matches_idx]
+
+        for idx2, row2 in possible_matches.iterrows():
+            if idx >= idx2:  # Avoid duplicate checks
+                continue
+
+            geom2 = row2.geometry
+            if not geom2 or geom2.is_empty:
+                continue
+
+            # Check if lines intersect
+            if geom.intersects(geom2):
+                intersection = geom.intersection(geom2)
+
+                # Handle different intersection types
+                if intersection.geom_type == "Point":
+                    node_coords.add((intersection.x, intersection.y))
+                elif intersection.geom_type == "MultiPoint":
+                    for pt in intersection.geoms:
+                        node_coords.add((pt.x, pt.y))
+                elif intersection.geom_type == "LineString":
+                    # Lines overlap - add endpoints of overlap
+                    coords = list(intersection.coords)
+                    if coords:
+                        node_coords.add(coords[0])
+                        node_coords.add(coords[-1])
+                elif intersection.geom_type == "MultiLineString":
+                    for line in intersection.geoms:
+                        coords = list(line.coords)
+                        if coords:
+                            node_coords.add(coords[0])
+                            node_coords.add(coords[-1])
+
+    # Step 3: Create node mapping with tolerance-based deduplication
+    # Group nearby coordinates together
+    node_list = sorted(node_coords)
+    node_id_map = {}  # Maps coordinate tuple to node ID
+    nodes_data = {}   # Maps node ID to coordinate
+    next_node_id = 0
+
+    for coord in node_list:
+        # Check if this coordinate is close to any existing node
+        found = False
+        for existing_coord, node_id in node_id_map.items():
+            dx = abs(coord[0] - existing_coord[0])
+            dy = abs(coord[1] - existing_coord[1])
+            if dx < tolerance and dy < tolerance:
+                node_id_map[coord] = node_id
+                found = True
+                break
+
+        if not found:
+            node_id_map[coord] = next_node_id
+            nodes_data[next_node_id] = coord
+            next_node_id += 1
+
+    logger.info(f"Identified {len(nodes_data)} unique node locations")
+
+    # Step 4: Build graph by splitting lines at node locations
+    G = nx.Graph()
+
+    # Add nodes with coordinates
+    for node_id, (x, y) in nodes_data.items():
+        G.add_node(node_id, x=x, y=y)
+
+    # Helper function to find closest node to a coordinate
+    def find_node_id(coord):
+        for existing_coord, node_id in node_id_map.items():
+            dx = abs(coord[0] - existing_coord[0])
+            dy = abs(coord[1] - existing_coord[1])
+            if dx < tolerance and dy < tolerance:
+                return node_id
+        # If not found, create new node (shouldn't happen but handle gracefully)
+        nonlocal next_node_id
+        node_id = next_node_id
+        next_node_id += 1
+        node_id_map[coord] = node_id
+        nodes_data[node_id] = coord
+        G.add_node(node_id, x=coord[0], y=coord[1])
+        return node_id
+
+    # Process each line and split at nodes
+    for orig_idx, row in line_gdf.iterrows():
+        geom = row.geometry
+        if not geom or geom.is_empty:
+            continue
+
+        coords = list(geom.coords)
+        if len(coords) < 2:
+            continue
+
+        # Find all nodes along this line
+        nodes_on_line = []
+
+        # Always include endpoints
+        start_node = find_node_id(coords[0])
+        end_node = find_node_id(coords[-1])
+        nodes_on_line.append((0, start_node, coords[0]))
+
+        # Check each coordinate to see if it's a node
+        for i, coord in enumerate(coords[1:-1], start=1):
+            if coord in node_id_map:
+                node_id = node_id_map[coord]
+                nodes_on_line.append((i, node_id, coord))
+
+        nodes_on_line.append((len(coords) - 1, end_node, coords[-1]))
+
+        # Create edges between consecutive nodes on this line
+        for i in range(len(nodes_on_line) - 1):
+            idx1, node1, coord1 = nodes_on_line[i]
+            idx2, node2, coord2 = nodes_on_line[i + 1]
+
+            if node1 == node2:
+                continue
+
+            # Extract segment coordinates
+            segment_coords = coords[idx1:idx2 + 1]
+            segment_geom = LineString(segment_coords)
+            segment_length = segment_geom.length
+
+            # Add edge (or update if already exists with shorter path)
+            if G.has_edge(node1, node2):
+                # Keep the shorter segment
+                if segment_length < G[node1][node2].get(length_col, float('inf')):
+                    G[node1][node2][length_col] = segment_length
+                    G[node1][node2]['geometry'] = segment_geom
+                    G[node1][node2]['source_idx'] = orig_idx
+            else:
+                G.add_edge(
+                    node1,
+                    node2,
+                    **{
+                        length_col: segment_length,
+                        'geometry': segment_geom,
+                        'source_idx': orig_idx
+                    }
+                )
+
+    logger.info(f"Built graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+
+    return G
+
+
 # Example usage
 if __name__ == "__main__":
     import sys
@@ -462,25 +787,60 @@ if __name__ == "__main__":
     print("Using bbox query method for better reliability.\n")
 
     try:
-        # Get GeoDataFrame and NetworkX graph
-        # use_bbox=True is more reliable for simple rectangular areas
-        gdf, G = get_river_network_from_shape(
+        # Get GeoDataFrame only (not the OSM node-level graph)
+        gdf = get_river_network_from_shape(
             bbox_poly,
-            return_graph=True,
-            max_retries=8,  # Increase retries for robustness
-            use_bbox=True   # Use bbox query (more robust than poly)
+            return_graph=False,
+            max_retries=8,
+            use_bbox=True
         )
 
         print(f"\nSuccess! Found {len(gdf)} river/stream features")
         print(f"  - Ways: {len(gdf[gdf['osm_type'] == 'way'])}")
         print(f"  - Relations: {len(gdf[gdf['osm_type'] == 'relation'])}")
-        print("\nGraph statistics:")
-        print(f"  - Nodes: {G.number_of_nodes()}")
-        print(f"  - Edges: {G.number_of_edges()}")
 
         if len(gdf) > 0:
             print("\nFirst few features:")
             print(gdf[["osm_id", "osm_type", "tags"]].head())
+
+            # Build topological network graph
+            print("\n" + "="*60)
+            print("Building topological network graph...")
+            print("="*60)
+
+            topo_graph = build_river_network_graph(gdf)
+
+            print("\nTopological graph statistics:")
+            print(f"  - Nodes (junctions/endpoints): {topo_graph.number_of_nodes()}")
+            print(f"  - Edges (river segments): {topo_graph.number_of_edges()}")
+
+            # Calculate total length
+            if topo_graph.number_of_edges() > 0:
+                total_length_deg = sum(d['length'] for u, v, d in topo_graph.edges(data=True))
+                print(f"  - Total network length: {total_length_deg:.6f} degrees")
+
+                # Calculate length in meters using Haversine
+                total_length_m = calculate_graph_length_meters(topo_graph, crs=gdf.crs)
+                print(f"  - Total network length: {total_length_m:.2f} meters ({total_length_m/1000:.2f} km)")
+
+                # Analyze node degrees
+                degrees = dict(topo_graph.degree())
+                endpoints = sum(1 for d in degrees.values() if d == 1)
+                junctions = sum(1 for d in degrees.values() if d == 2)
+                confluences = sum(1 for d in degrees.values() if d >= 3)
+
+                print("\nNode analysis:")
+                print(f"  - Endpoints (degree 1): {endpoints}")
+                print(f"  - Junctions (degree 2): {junctions}")
+                print(f"  - Confluences (degree 3+): {confluences}")
+
+                # Find connected components
+                import networkx as nx
+                components = list(nx.connected_components(topo_graph))
+                print(f"  - Connected components: {len(components)}")
+                if len(components) > 1:
+                    component_sizes = sorted([len(c) for c in components], reverse=True)
+                    print(f"    Largest component: {component_sizes[0]} nodes")
 
     except OverpassError as e:
         print(f"\nFailed to fetch data: {e}", file=sys.stderr)
