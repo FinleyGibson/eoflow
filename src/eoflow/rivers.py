@@ -937,8 +937,8 @@ def build_river_network_graph(
 
         # Create edges between consecutive nodes on this line
         for i in range(len(nodes_on_line) - 1):
-            idx1, node1, coord1 = nodes_on_line[i]
-            idx2, node2, coord2 = nodes_on_line[i + 1]
+            idx1, node1, _ = nodes_on_line[i]
+            idx2, node2, _ = nodes_on_line[i + 1]
 
             if node1 == node2:
                 continue
