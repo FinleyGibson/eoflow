@@ -94,6 +94,7 @@ Notes
   only at meaningful locations (intersections, endpoints, confluences)
 - Edge lengths can be calculated in meters using the calculate_graph_length_meters function
 """
+
 from __future__ import annotations
 
 import logging
@@ -139,7 +140,9 @@ def _make_overpass_poly(geom: Union[Polygon, MultiPolygon]) -> str:
     return " ; ".join(polys)
 
 
-def _build_overpass_query(poly_str: str, waterway_values: str = "river|stream|canal|drain|riverbank") -> str:
+def _build_overpass_query(
+    poly_str: str, waterway_values: str = "river|stream|canal|drain|riverbank"
+) -> str:
     """
     Build an Overpass QL query string that finds ways and relations with waterway tag values
     overlapping the provided poly area and also requests referenced nodes.
@@ -157,11 +160,15 @@ def _build_overpass_query(poly_str: str, waterway_values: str = "river|stream|ca
 (._;>;);
 out body;"""
 
-    logger.debug("Built Overpass query with poly containing %d characters", len(poly_str))
+    logger.debug(
+        "Built Overpass query with poly containing %d characters", len(poly_str)
+    )
     return query
 
 
-def _build_overpass_bbox_query(bbox: tuple, waterway_values: str = "river|stream|canal|drain|riverbank") -> str:
+def _build_overpass_bbox_query(
+    bbox: tuple, waterway_values: str = "river|stream|canal|drain|riverbank"
+) -> str:
     """
     Build an Overpass QL query using bounding box instead of polygon.
     More robust for simple rectangular areas.
@@ -211,7 +218,12 @@ def _fetch_overpass(
     while attempt < max_retries:
         endpoint = endpoint_list[attempt % n_endpoints]
         try:
-            logger.debug("Posting Overpass query attempt=%s/%s endpoint=%s", attempt + 1, max_retries, endpoint)
+            logger.debug(
+                "Posting Overpass query attempt=%s/%s endpoint=%s",
+                attempt + 1,
+                max_retries,
+                endpoint,
+            )
             resp = requests.post(endpoint, data={"data": query}, timeout=timeout)
             # Raise for HTTP errors
             try:
@@ -221,11 +233,17 @@ def _fetch_overpass(
                 # Treat server errors as transient
                 if status and 500 <= status < 600:
                     last_exc = http_err
-                    logger.warning("Overpass server error %s from %s; retrying (attempt %s/%s)", status, endpoint, attempt + 1, max_retries)
-                    time.sleep(backoff_factor ** attempt)
+                    logger.warning(
+                        "Overpass server error %s from %s; retrying (attempt %s/%s)",
+                        status,
+                        endpoint,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(backoff_factor**attempt)
                     attempt += 1
                     continue
-                # Client errors are non-retriable
+                # Client errors cannot be retried
                 raise OverpassError(f"Overpass HTTP error from {endpoint}: {http_err}")
 
             # Try to parse JSON
@@ -234,22 +252,37 @@ def _fetch_overpass(
             except ValueError as exc:
                 # Log response text for debugging
                 resp_text = resp.text[:500] if resp.text else "(empty response)"
-                logger.error("Failed to parse JSON from %s. Response: %s", endpoint, resp_text)
+                logger.error(
+                    "Failed to parse JSON from %s. Response: %s", endpoint, resp_text
+                )
                 # If response is empty or looks like HTML error, treat as transient
                 if not resp.text or resp.text.strip().startswith("<"):
                     last_exc = exc
-                    logger.warning("Empty or HTML response from %s, treating as transient; retrying (attempt %s/%s)", endpoint, attempt + 1, max_retries)
-                    time.sleep(backoff_factor ** attempt)
+                    logger.warning(
+                        "Empty or HTML response from %s, treating as transient; retrying (attempt %s/%s)",
+                        endpoint,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    time.sleep(backoff_factor**attempt)
                     attempt += 1
                     continue
-                raise OverpassError(f"Invalid JSON from Overpass at {endpoint}: {exc}. Response: {resp_text}")
+                raise OverpassError(
+                    f"Invalid JSON from Overpass at {endpoint}: {exc}. Response: {resp_text}"
+                )
 
             return data
 
         except (requests.Timeout, requests.ConnectionError) as exc:
             last_exc = exc
-            logger.warning("Overpass connection/timeout error from %s: %s (attempt %s/%s)", endpoint, exc, attempt + 1, max_retries)
-            time.sleep(backoff_factor ** attempt)
+            logger.warning(
+                "Overpass connection/timeout error from %s: %s (attempt %s/%s)",
+                endpoint,
+                exc,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(backoff_factor**attempt)
             attempt += 1
             continue
         except OverpassError:
@@ -258,17 +291,23 @@ def _fetch_overpass(
         except Exception as exc:
             # Unexpected exception - capture and retry a limited number of times
             last_exc = exc
-            logger.exception("Unexpected error contacting Overpass at %s: %s", endpoint, exc)
-            time.sleep(backoff_factor ** attempt)
+            logger.exception(
+                "Unexpected error contacting Overpass at %s: %s", endpoint, exc
+            )
+            time.sleep(backoff_factor**attempt)
             attempt += 1
             continue
 
-    raise OverpassError(f"Failed to contact Overpass after {max_retries} attempts. Last error: {last_exc}")
+    raise OverpassError(
+        f"Failed to contact Overpass after {max_retries} attempts. Last error: {last_exc}"
+    )
 
 
 def _aggregate_osm_elements(
-    elements: List[Dict[str, Any]]
-) -> Tuple[Dict[int, Tuple[float, float]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+    elements: List[Dict[str, Any]],
+) -> Tuple[
+    Dict[int, Tuple[float, float]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]
+]:
     """
     Parse Overpass API response and aggregate elements into nodes, ways, and relations.
 
@@ -303,8 +342,7 @@ def _aggregate_osm_elements(
 
 
 def _convert_ways_to_rows(
-    ways: Dict[int, Dict[str, Any]],
-    nodes: Dict[int, Tuple[float, float]]
+    ways: Dict[int, Dict[str, Any]], nodes: Dict[int, Tuple[float, float]]
 ) -> List[Dict[str, Any]]:
     """
     Convert OSM ways into GeoDataFrame rows with LineString geometries.
@@ -339,12 +377,14 @@ def _convert_ways_to_rows(
             continue
 
         geom_line = LineString(coords)
-        rows.append({
-            "osm_id": way_id,
-            "osm_type": "way",
-            "geometry": geom_line,
-            "tags": w.get("tags", {})
-        })
+        rows.append(
+            {
+                "osm_id": way_id,
+                "osm_type": "way",
+                "geometry": geom_line,
+                "tags": w.get("tags", {}),
+            }
+        )
 
     return rows
 
@@ -353,7 +393,7 @@ def _convert_relations_to_rows(
     relations: Dict[int, Dict[str, Any]],
     ways: Dict[int, Dict[str, Any]],
     nodes: Dict[int, Tuple[float, float]],
-    simplify_multiline: bool = True
+    simplify_multiline: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Convert OSM relations (multipart features) into GeoDataFrame rows.
@@ -403,21 +443,23 @@ def _convert_relations_to_rows(
         else:
             merged = MultiLineString(lines) if len(lines) > 1 else lines[0]
 
-        rows.append({
-            "osm_id": rel_id,
-            "osm_type": "relation",
-            "geometry": merged,
-            "tags": r.get("tags", {})
-        })
+        rows.append(
+            {
+                "osm_id": rel_id,
+                "osm_type": "relation",
+                "geometry": merged,
+                "tags": r.get("tags", {}),
+            }
+        )
 
     return rows
 
 
 def _build_osm_node_graph(
-    gdf: gpd.GeoDataFrame,
+    gdf: pd.DataFrame,
     nodes: Dict[int, Tuple[float, float]],
     ways: Dict[int, Dict[str, Any]],
-    geom: Union[Polygon, MultiPolygon]
+    geom: Union[Polygon, MultiPolygon],
 ) -> nx.Graph:
     """
     Build a NetworkX graph from OSM ways using node-level connectivity.
@@ -443,7 +485,8 @@ def _build_osm_node_graph(
         Edges have attributes: way_id, tags, length
     """
     G = nx.Graph()
-    way_ids_in_gdf = set(gdf[gdf["osm_type"] == "way"]["osm_id"].values)
+
+    way_ids_in_gdf: set[str] = set(gdf["osm_id"].loc[gdf["osm_type"] == "way"].values)
 
     for way_id, w in ways.items():
         # Skip ways that were filtered out during clipping
@@ -478,14 +521,15 @@ def _build_osm_node_graph(
                 G[u][v]["ways"] = ways_list
             else:
                 seg_length = edge_geom.length
-                G.add_edge(u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length)
+                G.add_edge(
+                    u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length
+                )
 
     return G
 
 
 def get_river_network_from_shape(
     shp: Union[dict, Polygon, MultiPolygon],
-    include_tags: Optional[Tuple[str, ...]] = None,
     overpass_endpoints: Optional[Iterable[str]] = None,
     timeout: int = 180,
     return_graph: bool = False,
@@ -499,8 +543,6 @@ def get_river_network_from_shape(
 
     Parameters
     - shp: a Shapely Polygon/MultiPolygon or a GeoJSON-like dict (will be converted via shapely.shape).
-    - include_tags: tuple of tag keys to match. Currently not used (waterway features are hardcoded).
-                    Reserved for future extension.
     - overpass_endpoints: list/iterable of Overpass API endpoints to try. If None, a default list is used.
     - timeout: request timeout in seconds for each HTTP request.
     - return_graph: if True also return a NetworkX graph (nodes with 'x','y' attrs and edges with way id, tags).
@@ -523,7 +565,9 @@ def get_river_network_from_shape(
         geom = shp
 
     if not isinstance(geom, (Polygon, MultiPolygon)):
-        raise ValueError("The provided shape must be a Polygon or MultiPolygon (or GeoJSON mapping).")
+        raise ValueError(
+            "The provided shape must be a Polygon or MultiPolygon (or GeoJSON mapping)."
+        )
 
     if overpass_endpoints is None:
         overpass_endpoints = [
@@ -537,7 +581,7 @@ def get_river_network_from_shape(
     # Choose query method: bbox is more robust, poly is more precise
     if use_bbox:
         # Use bounding box query
-        bounds = geom.bounds  # (minx, miny, maxx, maxy)
+        bounds = geom.bounds  # (min_x, min_y, max_x, max_y)
         query = _build_overpass_bbox_query(bounds, waterway_values=waterway_values)
         logger.info("Querying Overpass for waterways in bbox: %s", bounds)
     else:
@@ -552,10 +596,19 @@ def get_river_network_from_shape(
         except ValueError as e:
             raise ValueError(f"Failed to build Overpass query: {e}")
 
-        logger.info("Querying Overpass for waterways in boundary (poly string: %d chars)", len(poly_str))
+        logger.info(
+            "Querying Overpass for waterways in boundary (poly string: %d chars)",
+            len(poly_str),
+        )
 
     # Fetch data
-    data = _fetch_overpass(query, overpass_endpoints, timeout=timeout, max_retries=max_retries, backoff_factor=backoff_factor)
+    data = _fetch_overpass(
+        query,
+        overpass_endpoints,
+        timeout=timeout,
+        max_retries=max_retries,
+        backoff_factor=backoff_factor,
+    )
     elements = data.get("elements", [])
 
     # Aggregate elements into nodes, ways, and relations
@@ -564,32 +617,48 @@ def get_river_network_from_shape(
     # Convert OSM features to GeoDataFrame rows
     rows: List[Dict[str, Any]] = []
     rows.extend(_convert_ways_to_rows(ways, nodes))
-    rows.extend(_convert_relations_to_rows(relations, ways, nodes, simplify_multiline=simplify_multiline))
+    rows.extend(
+        _convert_relations_to_rows(
+            relations, ways, nodes, simplify_multiline=simplify_multiline
+        )
+    )
 
     # Build GeoDataFrame
     if not rows:
-        gdf = gpd.GeoDataFrame(columns=["osm_id", "osm_type", "geometry", "tags"], geometry="geometry", crs="EPSG:4326")
-        if return_graph:
-            return gdf, nx.Graph()
+        # build empty gpd and graph if no rivers are found
+        gdf = gpd.GeoDataFrame(
+            {
+                "osm_id": [],
+                "osm_type": [],
+                "tags": [],
+            },
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+    else:
+        gdf: gpd.GeoDataFrame = gpd.GeoDataFrame(
+            pd.DataFrame(rows), geometry="geometry", crs="EPSG:4326"
+        )
+
+        # Clip to the provided polygon to ensure features are bounded by input
+        try:
+            gdf["geometry"] = gdf["geometry"].intersection(geom)
+        except Exception:
+            logger.exception(
+                "Failed to intersect geometries with provided shape;       returning un-clipped results."
+            )
+
+        gdf = gpd.GeoDataFrame(gdf.reset_index(drop=True))
+
+    if return_graph:
+        nxg = (
+            _build_osm_node_graph(gdf, nodes, ways, geom)
+            if not (gdf.shape[0] == 0)
+            else nx.Graph()
+        )
+        return gdf, nxg
+    else:
         return gdf
-
-    gdf = gpd.GeoDataFrame(pd.DataFrame(rows), geometry="geometry", crs="EPSG:4326")
-
-    # Clip to the provided polygon to ensure features are bounded by input
-    try:
-        gdf["geometry"] = gdf["geometry"].intersection(geom)
-        gdf = gdf[~gdf["geometry"].is_empty]
-    except Exception:
-        logger.exception("Failed to intersect geometries with provided shape; returning un-clipped results.")
-
-    gdf = gdf.reset_index(drop=True)
-
-    if not return_graph:
-        return gdf
-
-    # Build OSM node-level graph
-    G = _build_osm_node_graph(gdf, nodes, ways, geom)
-    return gdf, G
 
 
 def calculate_graph_length_meters(G: nx.Graph, crs: Any = "EPSG:4326") -> float:
@@ -639,26 +708,26 @@ def calculate_graph_length_meters(G: nx.Graph, crs: Any = "EPSG:4326") -> float:
         R = 6371000  # Earth radius in meters
 
         for u, v, data in G.edges(data=True):
-            if 'length' in data:
+            if "length" in data:
                 # Get node coordinates
-                x1, y1 = G.nodes[u].get('x', 0), G.nodes[u].get('y', 0)
-                x2, y2 = G.nodes[v].get('x', 0), G.nodes[v].get('y', 0)
+                x1, y1 = G.nodes[u].get("x", 0), G.nodes[u].get("y", 0)
+                x2, y2 = G.nodes[v].get("x", 0), G.nodes[v].get("y", 0)
 
                 # Haversine formula
                 lat1, lon1 = radians(y1), radians(x1)
                 lat2, lon2 = radians(y2), radians(x2)
 
-                dlat = lat2 - lat1
-                dlon = lon2 - lon1
+                d_lat = lat2 - lat1
+                d_lon = lon2 - lon1
 
-                a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+                a = sin(d_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(d_lon / 2) ** 2
                 c = 2 * atan2(sqrt(a), sqrt(1 - a))
                 length_m = R * c
 
                 total_length += length_m
     else:
         # Assume lengths are already in meters or similar linear units
-        total_length = sum(data.get('length', 0) for u, v, data in G.edges(data=True))
+        total_length = sum(data.get("length", 0) for _, _, data in G.edges(data=True))
 
     return total_length
 
@@ -722,7 +791,6 @@ def build_river_network_graph(
     - For geographic coordinates (EPSG:4326), consider reprojecting to a projected CRS
       for more accurate length calculations in meters
     """
-    from shapely.geometry import LineString
 
     # Explode MultiLineStrings into individual LineStrings
     exploded = gdf.explode(index_parts=False).reset_index(drop=True)
@@ -751,7 +819,7 @@ def build_river_network_graph(
 
     # Step 2: Find intersections between lines
     # This is computationally expensive for large datasets, so we use spatial index
-    sindex = line_gdf.sindex
+    s_index = line_gdf.s_index
 
     for idx, row in line_gdf.iterrows():
         geom = row.geometry
@@ -759,7 +827,7 @@ def build_river_network_graph(
             continue
 
         # Find candidate intersecting lines using spatial index
-        possible_matches_idx = list(sindex.intersection(geom.bounds))
+        possible_matches_idx = list(s_index.intersection(geom.bounds))
         possible_matches = line_gdf.iloc[possible_matches_idx]
 
         for idx2, row2 in possible_matches.iterrows():
@@ -797,7 +865,7 @@ def build_river_network_graph(
     # Group nearby coordinates together
     node_list = sorted(node_coords)
     node_id_map = {}  # Maps coordinate tuple to node ID
-    nodes_data = {}   # Maps node ID to coordinate
+    nodes_data = {}  # Maps node ID to coordinate
     next_node_id = 0
 
     for coord in node_list:
@@ -876,29 +944,31 @@ def build_river_network_graph(
                 continue
 
             # Extract segment coordinates
-            segment_coords = coords[idx1:idx2 + 1]
+            segment_coords = coords[idx1 : idx2 + 1]
             segment_geom = LineString(segment_coords)
             segment_length = segment_geom.length
 
             # Add edge (or update if already exists with shorter path)
             if G.has_edge(node1, node2):
                 # Keep the shorter segment
-                if segment_length < G[node1][node2].get(length_col, float('inf')):
+                if segment_length < G[node1][node2].get(length_col, float("inf")):
                     G[node1][node2][length_col] = segment_length
-                    G[node1][node2]['geometry'] = segment_geom
-                    G[node1][node2]['source_idx'] = orig_idx
+                    G[node1][node2]["geometry"] = segment_geom
+                    G[node1][node2]["source_idx"] = orig_idx
             else:
                 G.add_edge(
                     node1,
                     node2,
                     **{
                         length_col: segment_length,
-                        'geometry': segment_geom,
-                        'source_idx': orig_idx
-                    }
+                        "geometry": segment_geom,
+                        "source_idx": orig_idx,
+                    },
                 )
 
-    logger.info(f"Built graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+    logger.info(
+        f"Built graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges"
+    )
 
     return G
 
@@ -968,9 +1038,11 @@ def calculate_shortest_path_length(
 
     # Find shortest path using Dijkstra's algorithm
     try:
-        path = nx.shortest_path(G, source_node, target_node, weight='length')
+        path = nx.shortest_path(G, source_node, target_node, weight="length")
     except nx.NetworkXNoPath:
-        raise nx.NetworkXNoPath(f"No path exists between nodes {source_node} and {target_node}")
+        raise nx.NetworkXNoPath(
+            f"No path exists between nodes {source_node} and {target_node}"
+        )
 
     # Check if CRS is geographic
     is_geographic = False
@@ -990,17 +1062,17 @@ def calculate_shortest_path_length(
             v = path[i + 1]
 
             # Get node coordinates
-            x1, y1 = G.nodes[u].get('x', 0), G.nodes[u].get('y', 0)
-            x2, y2 = G.nodes[v].get('x', 0), G.nodes[v].get('y', 0)
+            x1, y1 = G.nodes[u].get("x", 0), G.nodes[u].get("y", 0)
+            x2, y2 = G.nodes[v].get("x", 0), G.nodes[v].get("y", 0)
 
             # Haversine formula
             lat1, lon1 = radians(y1), radians(x1)
             lat2, lon2 = radians(y2), radians(x2)
 
-            dlat = lat2 - lat1
-            dlon = lon2 - lon1
+            d_lat = lat2 - lat1
+            d_lon = lon2 - lon1
 
-            a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+            a = sin(d_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(d_lon / 2) ** 2
             c = 2 * atan2(sqrt(a), sqrt(1 - a))
             length_m = R * c
 
@@ -1011,90 +1083,6 @@ def calculate_shortest_path_length(
             u = path[i]
             v = path[i + 1]
             if G.has_edge(u, v):
-                total_length += G[u][v].get('length', 0)
+                total_length += G[u][v].get("length", 0)
 
     return total_length
-
-# Example usage
-if __name__ == "__main__":
-    import sys
-
-    from shapely.geometry import box
-
-    # Configure logging to see warnings/errors
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-    # Example: small bounding box (adjust coordinates as needed)
-    # This example uses a small area - bbox query is more reliable for testing
-    bbox_poly = box(-0.12, 51.50, -0.10, 51.52)
-
-    print("Fetching river network from Overpass API...")
-    print("This may take 10-30 seconds depending on the area size and server load.")
-    print("Using bbox query method for better reliability.\n")
-
-    try:
-        # Get GeoDataFrame only (not the OSM node-level graph)
-        gdf = get_river_network_from_shape(
-            bbox_poly,
-            return_graph=False,
-            max_retries=8,
-            use_bbox=True
-        )
-
-        print(f"\nSuccess! Found {len(gdf)} river/stream features")
-        print(f"  - Ways: {len(gdf[gdf['osm_type'] == 'way'])}")
-        print(f"  - Relations: {len(gdf[gdf['osm_type'] == 'relation'])}")
-
-        if len(gdf) > 0:
-            print("\nFirst few features:")
-            print(gdf[["osm_id", "osm_type", "tags"]].head())
-
-            # Build topological network graph
-            print("\n" + "="*60)
-            print("Building topological network graph...")
-            print("="*60)
-
-            topo_graph = build_river_network_graph(gdf)
-
-            print("\nTopological graph statistics:")
-            print(f"  - Nodes (junctions/endpoints): {topo_graph.number_of_nodes()}")
-            print(f"  - Edges (river segments): {topo_graph.number_of_edges()}")
-
-            # Calculate total length
-            if topo_graph.number_of_edges() > 0:
-                total_length_deg = sum(d['length'] for u, v, d in topo_graph.edges(data=True))
-                print(f"  - Total network length: {total_length_deg:.6f} degrees")
-
-                # Calculate length in meters using Haversine
-                total_length_m = calculate_graph_length_meters(topo_graph, crs=gdf.crs)
-                print(f"  - Total network length: {total_length_m:.2f} meters ({total_length_m/1000:.2f} km)")
-
-                # Analyze node degrees
-                degrees = dict(topo_graph.degree())
-                endpoints = sum(1 for d in degrees.values() if d == 1)
-                junctions = sum(1 for d in degrees.values() if d == 2)
-                confluences = sum(1 for d in degrees.values() if d >= 3)
-
-                print("\nNode analysis:")
-                print(f"  - Endpoints (degree 1): {endpoints}")
-                print(f"  - Junctions (degree 2): {junctions}")
-                print(f"  - Confluences (degree 3+): {confluences}")
-
-                # Find connected components
-                import networkx as nx
-                components = list(nx.connected_components(topo_graph))
-                print(f"  - Connected components: {len(components)}")
-                if len(components) > 1:
-                    component_sizes = sorted([len(c) for c in components], reverse=True)
-                    print(f"    Largest component: {component_sizes[0]} nodes")
-
-    except OverpassError as e:
-        print(f"\nFailed to fetch data: {e}", file=sys.stderr)
-        print("\nTroubleshooting tips:", file=sys.stderr)
-        print("- Overpass servers may be overloaded; try again in a few minutes", file=sys.stderr)
-        print("- Use a smaller bounding box", file=sys.stderr)
-        print("- Try use_bbox=True for more reliable queries", file=sys.stderr)
-        sys.exit(1)
-    except ValueError as e:
-        print(f"\nInvalid input: {e}", file=sys.stderr)
-        sys.exit(1)
