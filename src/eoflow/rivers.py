@@ -266,6 +266,223 @@ def _fetch_overpass(
     raise OverpassError(f"Failed to contact Overpass after {max_retries} attempts. Last error: {last_exc}")
 
 
+def _aggregate_osm_elements(
+    elements: List[Dict[str, Any]]
+) -> Tuple[Dict[int, Tuple[float, float]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+    """
+    Parse Overpass API response and aggregate elements into nodes, ways, and relations.
+
+    Parameters
+    ----------
+    elements : List[Dict[str, Any]]
+        Raw elements from Overpass API JSON response
+
+    Returns
+    -------
+    tuple
+        (nodes_dict, ways_dict, relations_dict) where:
+        - nodes_dict: {node_id: (lon, lat)}
+        - ways_dict: {way_id: way_data_dict}
+        - relations_dict: {relation_id: relation_data_dict}
+    """
+    nodes: Dict[int, Tuple[float, float]] = {}
+    ways: Dict[int, Dict[str, Any]] = {}
+    relations: Dict[int, Dict[str, Any]] = {}
+
+    for el in elements:
+        el_type = el.get("type")
+        if el_type == "node":
+            if "lon" in el and "lat" in el:
+                nodes[el["id"]] = (el["lon"], el["lat"])
+        elif el_type == "way":
+            ways[el["id"]] = el
+        elif el_type == "relation":
+            relations[el["id"]] = el
+
+    return nodes, ways, relations
+
+
+def _convert_ways_to_rows(
+    ways: Dict[int, Dict[str, Any]],
+    nodes: Dict[int, Tuple[float, float]]
+) -> List[Dict[str, Any]]:
+    """
+    Convert OSM ways into GeoDataFrame rows with LineString geometries.
+
+    Parameters
+    ----------
+    ways : Dict[int, Dict[str, Any]]
+        Mapping of way IDs to way data from Overpass API
+    nodes : Dict[int, Tuple[float, float]]
+        Mapping of node IDs to (lon, lat) coordinates
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of row dictionaries with osm_id, osm_type, geometry, and tags
+    """
+    rows: List[Dict[str, Any]] = []
+
+    for way_id, w in ways.items():
+        node_refs = w.get("nodes", [])
+        coords: List[Tuple[float, float]] = []
+        missing = False
+
+        for nid in node_refs:
+            if nid in nodes:
+                coords.append(nodes[nid])
+            else:
+                missing = True
+                break
+
+        if missing or len(coords) < 2:
+            continue
+
+        geom_line = LineString(coords)
+        rows.append({
+            "osm_id": way_id,
+            "osm_type": "way",
+            "geometry": geom_line,
+            "tags": w.get("tags", {})
+        })
+
+    return rows
+
+
+def _convert_relations_to_rows(
+    relations: Dict[int, Dict[str, Any]],
+    ways: Dict[int, Dict[str, Any]],
+    nodes: Dict[int, Tuple[float, float]],
+    simplify_multiline: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Convert OSM relations (multipart features) into GeoDataFrame rows.
+
+    Stitches together member ways and creates merged LineString or MultiLineString geometries.
+
+    Parameters
+    ----------
+    relations : Dict[int, Dict[str, Any]]
+        Mapping of relation IDs to relation data from Overpass API
+    ways : Dict[int, Dict[str, Any]]
+        Mapping of way IDs to way data (for member way lookup)
+    nodes : Dict[int, Tuple[float, float]]
+        Mapping of node IDs to (lon, lat) coordinates
+    simplify_multiline : bool, optional
+        If True, merge contiguous segments into single LineString where possible.
+        Default is True.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        List of row dictionaries with osm_id, osm_type, geometry, and tags
+    """
+    rows: List[Dict[str, Any]] = []
+
+    for rel_id, r in relations.items():
+        member_ways = [m for m in r.get("members", []) if m.get("type") == "way"]
+        lines: List[LineString] = []
+
+        for m in member_ways:
+            ref = m.get("ref")
+            w = ways.get(ref)
+            if not w:
+                continue
+
+            node_refs = w.get("nodes", [])
+            coords = [nodes[nid] for nid in node_refs if nid in nodes]
+
+            if len(coords) >= 2:
+                lines.append(LineString(coords))
+
+        if not lines:
+            continue
+
+        if simplify_multiline:
+            merged = linemerge(lines)
+        else:
+            merged = MultiLineString(lines) if len(lines) > 1 else lines[0]
+
+        rows.append({
+            "osm_id": rel_id,
+            "osm_type": "relation",
+            "geometry": merged,
+            "tags": r.get("tags", {})
+        })
+
+    return rows
+
+
+def _build_osm_node_graph(
+    gdf: gpd.GeoDataFrame,
+    nodes: Dict[int, Tuple[float, float]],
+    ways: Dict[int, Dict[str, Any]],
+    geom: Union[Polygon, MultiPolygon]
+) -> nx.Graph:
+    """
+    Build a NetworkX graph from OSM ways using node-level connectivity.
+
+    Creates edges between consecutive nodes in each way, representing the OSM data structure
+    (different from the topological graph created by build_river_network_graph).
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        GeoDataFrame containing the processed river features
+    nodes : Dict[int, Tuple[float, float]]
+        Mapping of node IDs to (lon, lat) coordinates
+    ways : Dict[int, Dict[str, Any]]
+        Mapping of way IDs to way data
+    geom : Union[Polygon, MultiPolygon]
+        Boundary geometry for filtering edges
+
+    Returns
+    -------
+    nx.Graph
+        NetworkX graph with nodes representing OSM nodes and edges between consecutive node pairs.
+        Edges have attributes: way_id, tags, length
+    """
+    G = nx.Graph()
+    way_ids_in_gdf = set(gdf[gdf["osm_type"] == "way"]["osm_id"].values)
+
+    for way_id, w in ways.items():
+        # Skip ways that were filtered out during clipping
+        if way_id not in way_ids_in_gdf:
+            continue
+
+        node_refs = w.get("nodes", [])
+        for idx in range(len(node_refs) - 1):
+            u = node_refs[idx]
+            v = node_refs[idx + 1]
+
+            if u not in nodes or v not in nodes:
+                continue
+
+            ux, uy = nodes[u]
+            vx, vy = nodes[v]
+
+            # Check if this edge segment is within the boundary
+            edge_geom = LineString([(ux, uy), (vx, vy)])
+            if not edge_geom.intersects(geom):
+                continue
+
+            if not G.has_node(u):
+                G.add_node(u, x=ux, y=uy)
+            if not G.has_node(v):
+                G.add_node(v, x=vx, y=vy)
+
+            if G.has_edge(u, v):
+                ways_list = G[u][v].get("ways", [])
+                if way_id not in ways_list:
+                    ways_list.append(way_id)
+                G[u][v]["ways"] = ways_list
+            else:
+                seg_length = edge_geom.length
+                G.add_edge(u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length)
+
+    return G
+
+
 def get_river_network_from_shape(
     shp: Union[dict, Polygon, MultiPolygon],
     include_tags: Optional[Tuple[str, ...]] = None,
@@ -341,60 +558,13 @@ def get_river_network_from_shape(
     data = _fetch_overpass(query, overpass_endpoints, timeout=timeout, max_retries=max_retries, backoff_factor=backoff_factor)
     elements = data.get("elements", [])
 
-    # Aggregate nodes/ways/relations
-    nodes: Dict[int, Tuple[float, float]] = {}
-    ways: Dict[int, Dict[str, Any]] = {}
-    relations: Dict[int, Dict[str, Any]] = {}
+    # Aggregate elements into nodes, ways, and relations
+    nodes, ways, relations = _aggregate_osm_elements(elements)
 
-    for el in elements:
-        el_type = el.get("type")
-        if el_type == "node":
-            if "lon" in el and "lat" in el:
-                nodes[el["id"]] = (el["lon"], el["lat"])
-        elif el_type == "way":
-            ways[el["id"]] = el
-        elif el_type == "relation":
-            relations[el["id"]] = el
-
+    # Convert OSM features to GeoDataFrame rows
     rows: List[Dict[str, Any]] = []
-
-    # Convert ways to LineStrings
-    for way_id, w in ways.items():
-        node_refs = w.get("nodes", [])
-        coords: List[Tuple[float, float]] = []
-        missing = False
-        for nid in node_refs:
-            if nid in nodes:
-                coords.append(nodes[nid])
-            else:
-                missing = True
-                break
-        if missing or len(coords) < 2:
-            continue
-        geom_line = LineString(coords)
-        rows.append({"osm_id": way_id, "osm_type": "way", "geometry": geom_line, "tags": w.get("tags", {})})
-
-    # Convert relations: stitch member ways
-    for rel_id, r in relations.items():
-        member_ways = [m for m in r.get("members", []) if m.get("type") == "way"]
-        lines: List[LineString] = []
-        for m in member_ways:
-            ref = m.get("ref")
-            w = ways.get(ref)
-            if not w:
-                continue
-            node_refs = w.get("nodes", [])
-            coords = [nodes[nid] for nid in node_refs if nid in nodes]
-            if len(coords) >= 2:
-                lines.append(LineString(coords))
-        if not lines:
-            continue
-        if simplify_multiline:
-            merged = linemerge(lines)
-        else:
-            # Keep all lines as a MultiLineString if there are multiple, otherwise single LineString
-            merged = MultiLineString(lines) if len(lines) > 1 else lines[0]
-        rows.append({"osm_id": rel_id, "osm_type": "relation", "geometry": merged, "tags": r.get("tags", {})})
+    rows.extend(_convert_ways_to_rows(ways, nodes))
+    rows.extend(_convert_relations_to_rows(relations, ways, nodes, simplify_multiline=simplify_multiline))
 
     # Build GeoDataFrame
     if not rows:
@@ -417,44 +587,8 @@ def get_river_network_from_shape(
     if not return_graph:
         return gdf
 
-    # Build NetworkX graph: nodes are OSM node ids, edges are consecutive node pairs from ways
-    # Only include ways that are actually in the final GeoDataFrame
-    G = nx.Graph()
-    way_ids_in_gdf = set(gdf[gdf["osm_type"] == "way"]["osm_id"].values)
-
-    for way_id, w in ways.items():
-        # Skip ways that were filtered out during clipping
-        if way_id not in way_ids_in_gdf:
-            continue
-
-        node_refs = w.get("nodes", [])
-        for idx in range(len(node_refs) - 1):
-            u = node_refs[idx]
-            v = node_refs[idx + 1]
-            if u not in nodes or v not in nodes:
-                continue
-            ux, uy = nodes[u]
-            vx, vy = nodes[v]
-
-            # Check if this edge segment is within the boundary
-            edge_geom = LineString([(ux, uy), (vx, vy)])
-            if not edge_geom.intersects(geom):
-                continue
-
-            if not G.has_node(u):
-                G.add_node(u, x=ux, y=uy)
-            if not G.has_node(v):
-                G.add_node(v, x=vx, y=vy)
-            if G.has_edge(u, v):
-                ways_list = G[u][v].get("ways", [])
-                if way_id not in ways_list:
-                    ways_list.append(way_id)
-                G[u][v]["ways"] = ways_list
-            else:
-                # length stored in degrees; reproject if you need meters
-                seg_length = edge_geom.length
-                G.add_edge(u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length)
-
+    # Build OSM node-level graph
+    G = _build_osm_node_graph(gdf, nodes, ways, geom)
     return gdf, G
 
 
@@ -768,6 +902,118 @@ def build_river_network_graph(
 
     return G
 
+
+def calculate_shortest_path_length(
+    G: nx.Graph,
+    source_node: int,
+    target_node: int,
+    crs: Any = "EPSG:4326",
+) -> float:
+    """
+    Calculate the shortest path length between two nodes in a river network graph, in metres.
+
+    Uses Dijkstra's algorithm to find the shortest path and sums the edge lengths
+    along that path. If the graph edge lengths are in degrees (geographic CRS),
+    this function estimates lengths in meters using the Haversine formula.
+
+    Parameters
+    ----------
+    G : nx.Graph
+        Graph with 'length' attribute on edges and node coordinates ('x', 'y' attributes).
+    source_node : int
+        Starting node ID
+    target_node : int
+        Ending node ID
+    crs : Any, optional
+        Coordinate reference system of the graph node coordinates.
+        If geographic (e.g., EPSG:4326), uses Haversine formula to convert
+        degree-based edge lengths to meters.
+        Default is "EPSG:4326".
+
+    Returns
+    -------
+    float
+        Total shortest path length in meters
+
+    Raises
+    ------
+    nx.NetworkXNoPath
+        If no path exists between the source and target nodes
+    nx.NodeNotFound
+        If either source_node or target_node is not in the graph
+
+    Examples
+    --------
+    >>> from eoflow.rivers import get_river_network_from_shape, build_river_network_graph
+    >>> from shapely.geometry import box
+    >>>
+    >>> bbox = box(-0.12, 51.50, -0.10, 51.52)
+    >>> gdf = get_river_network_from_shape(bbox, use_bbox=True)
+    >>> G = build_river_network_graph(gdf)
+    >>>
+    >>> # Get two nodes from the graph
+    >>> nodes = list(G.nodes())
+    >>> if len(nodes) >= 2:
+    ...     node1, node2 = nodes[0], nodes[1]
+    ...     length_m = calculate_shortest_path_length(G, node1, node2)
+    ...     print(f"Shortest path: {length_m:.2f} meters")
+    """
+    from math import atan2, cos, radians, sin, sqrt
+
+    # Check if source and target nodes exist
+    if source_node not in G:
+        raise nx.NodeNotFound(f"Source node {source_node} not found in graph")
+    if target_node not in G:
+        raise nx.NodeNotFound(f"Target node {target_node} not found in graph")
+
+    # Find shortest path using Dijkstra's algorithm
+    try:
+        path = nx.shortest_path(G, source_node, target_node, weight='length')
+    except nx.NetworkXNoPath:
+        raise nx.NetworkXNoPath(f"No path exists between nodes {source_node} and {target_node}")
+
+    # Check if CRS is geographic
+    is_geographic = False
+    if isinstance(crs, str):
+        is_geographic = "4326" in crs or "WGS" in crs.upper()
+    elif hasattr(crs, "is_geographic"):
+        is_geographic = crs.is_geographic
+
+    total_length = 0.0
+
+    if is_geographic:
+        # Use Haversine formula for geographic coordinates
+        R = 6371000  # Earth radius in meters
+
+        for i in range(len(path) - 1):
+            u = path[i]
+            v = path[i + 1]
+
+            # Get node coordinates
+            x1, y1 = G.nodes[u].get('x', 0), G.nodes[u].get('y', 0)
+            x2, y2 = G.nodes[v].get('x', 0), G.nodes[v].get('y', 0)
+
+            # Haversine formula
+            lat1, lon1 = radians(y1), radians(x1)
+            lat2, lon2 = radians(y2), radians(x2)
+
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+
+            a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+            c = 2 * atan2(sqrt(a), sqrt(1 - a))
+            length_m = R * c
+
+            total_length += length_m
+    else:
+        # Assume lengths are already in meters or similar linear units
+        for i in range(len(path) - 1):
+            u = path[i]
+            v = path[i + 1]
+            if G.has_edge(u, v):
+                total_length += G[u][v].get('length', 0)
+
+    return total_length
 
 # Example usage
 if __name__ == "__main__":
