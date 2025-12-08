@@ -190,3 +190,6 @@ pyrightconfig.json
 
 # cspell
 cspell.json
+
+#
+data_examples
