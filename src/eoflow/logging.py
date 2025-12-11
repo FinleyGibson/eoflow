@@ -244,8 +244,6 @@ def get_module_logger() -> logging.Logger:
     return _module_logger
 
 
-logger = setup_logging("example", level="DEBUG")
-
 # Example usage
 if __name__ == "__main__":
     # Example 1: Basic console logging

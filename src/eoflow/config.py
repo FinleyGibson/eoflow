@@ -12,6 +12,13 @@ from typing import Any, Dict, Optional, Self, Union
 from platformdirs import user_config_dir
 
 
+def _get_logger():
+    """Lazy logger to avoid circular import."""
+    from eoflow.logging import get_logger
+
+    return get_logger(__name__)
+
+
 def get_default_config_dir() -> Path:
     """
     Get the platform-specific default configuration directory.
@@ -57,6 +64,8 @@ class Config:
                 "console_level": None,
             },
             "api": {
+                "ea_base_url": "https://environment.data.gov.uk/water-quality/data/observation",
+                "ea_max_limit": 2500,
                 "ea_api_delay": 0.5,
                 "ea_api_timeout": 30,
                 "max_retries": 3,
@@ -152,17 +161,19 @@ class Config:
                     self._default_config(), loaded_config
                 )
             except (json.JSONDecodeError, IOError) as e:
-                print(
-                    f"Warning: Could not load config from {self.config_file}: {e}"
+                _get_logger().warning(
+                    f"Could not load config from {self.config_file}: {e}"
                 )
-                print("Using default configuration.")
+                _get_logger().info("Using default configuration.")
                 self._config = self._default_config()
                 self.save()
         else:
             # No config file exists, use defaults and create file
             self._config = self._default_config()
             self.save()
-            print(f"Created new config file at: {self.config_file}")
+            _get_logger().info(
+                f"Created new config file at: {self.config_file}"
+            )
 
     def save(self) -> None:
         """
@@ -177,7 +188,9 @@ class Config:
             with open(self.config_file, "w") as f:
                 json.dump(self._config, f, indent=2)
         except IOError as e:
-            print(f"Error: Could not save config to {self.config_file}: {e}")
+            _get_logger().error(
+                f"Could not save config to {self.config_file}: {e}"
+            )
 
     def get(self, key: str, default: Any = None) -> Any:
         """

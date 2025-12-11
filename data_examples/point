@@ -1,0 +1,43 @@
+"6871":{
+    "Unnamed: 0":4412,
+    "id":"f3be479a-af6a-3b9b-8670-780c527196e6",
+    "long":-3.458422,
+    "lat":51.005984,
+    "waterBodyType":"stream",
+    "dynamicRiskAssessment":null,
+    "estimatedWidth":4.0,
+    "estimatedDepth":0.2,
+    "waterFlow":"surging",
+    "waterLevel":"average",
+    "temperature":8.6,
+    "totalDissolvedSolids":166.0,
+    "turbidity":25.0,
+    "phosphate":100.0,
+    "ph":null,
+    "nitrate":"N30",
+    "ammonia":null,
+    "Date":"2023-09-04",
+    "pollutionEvidence":[
+        "None"
+    ],
+    "pollutionSource":[
+        "CattleOrStock",
+        "RiverBankCollapse"
+    ],
+    "flowImpedance":[
+
+    ],
+    "invasivePlant":[
+        "None"
+    ],
+    "wildlife":[
+        "None"
+    ],
+    "bankVegetation":[
+        "TreesOrShrubs"
+    ],
+    "landUse":[
+        "Woodland",
+        "GrasslandOrPasture"
+    ]
+}

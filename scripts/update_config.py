@@ -20,6 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from eoflow.config import Config, get_default_config_dir
+from eoflow.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def backup_config(config_file: Path) -> Path:
