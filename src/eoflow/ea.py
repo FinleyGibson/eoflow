@@ -112,7 +112,7 @@ class EAWaterQualityAPI:
         determinand: str,
         date_from: str,
         date_to: str,
-        area_param: Dict[str, str],
+        area_param: Dict[str, str] | Dict[str, str | None],
         limit: Optional[int] = None,
     ) -> Optional[pd.DataFrame]:
         """
@@ -422,7 +422,17 @@ class EAWaterQualityAPI:
         logger.info(
             f"Filtered from {len(df)} to {len(filtered_df)} points within polygon"
         )
-        return filtered_df
+        if isinstance(filtered_df, pd.DataFrame):
+            return filtered_df
+        elif isinstance(filtered_df, pd.Series):
+            return filtered_df.to_frame()
+        elif isinstance(filtered_df, pd.Index):
+            return filtered_df.to_frame()
+        else:
+            logger.error(
+                f"Unexpected data type after filtering: {type(filtered_df)}"
+            )
+            raise ValueError("Unexpected data type after filtering")
 
 
 # Convenience function for simple use cases

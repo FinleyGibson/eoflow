@@ -1,10 +1,10 @@
-from pandas.core.arrays.base import isin
-from pydantic_core.core_schema import IsInstanceSchema
-from starlette.responses import Content
-
 from eoflow.config import Config
 from eoflow.logging import setup_logging
 from eoflow.utils import PROJECT_ROOT
+
+__all__ = [
+    "PROJECT_ROOT",
+]
 
 # set up project config
 config = Config()
