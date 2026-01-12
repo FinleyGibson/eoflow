@@ -5,7 +5,18 @@ Pipeline for modeling water quality form Earth Observation data.
 ## To Do
 
 - [ ] API - build a RESTful API to sever data and outputs on request.
-- [ ] Model water quality form EO data.o
+- [ ] Feature Extraction
+    - [ ] EO data -> Maze coverage
+    - [ ] EO data -> Plastic sheeting
+    - [ ] EO data -> Turnip cover
+    - [ ] Rainfall data
+- [ ] Water quality graph representation
+    - [ ] Build Graph representation of rivers
+    - [ ] Implement distance measurement metrics
+    - [ ] Get Citizen Scientist Data
+    - [ ] Get Environment Agency Data
+    - [ ] Add
+- [ ] Model water quality form EO data.
     - [ ] Graph Gaussian process
         - [ ] Produce directional graph
             - [ ] Extract River Network as a Graph

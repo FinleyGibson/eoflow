@@ -2,6 +2,10 @@
   "words": [
     "thresholded",
     "NDVI",
-    "eoflow"
+    "eoflow",
+    "Determinands",
+    "dateutil",
+    "relativedelta",
+    "Determinand"
   ]
 }

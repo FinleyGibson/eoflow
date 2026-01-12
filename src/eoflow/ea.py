@@ -24,7 +24,7 @@ import time
 import warnings
 from datetime import datetime, timedelta
 from io import StringIO
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import requests
@@ -112,7 +112,7 @@ class EAWaterQualityAPI:
         determinand: str,
         date_from: str,
         date_to: str,
-        area_param: Dict[str, str] | Dict[str, str | None],
+        area_param: Dict[str, Any],
         limit: Optional[int] = None,
     ) -> Optional[pd.DataFrame]:
         """
@@ -131,26 +131,42 @@ class EAWaterQualityAPI:
         if limit is None:
             limit = self.max_limit
 
-        params = {
+        # Build request body - API requires POST with JSON body
+        body = {
             "determinand": determinand,
             "dateFrom": date_from,
             "dateTo": date_to,
             "limit": limit,
-            **area_param,
         }
 
-        headers = {"Accept": "text/csv"}
+        # Add area parameters to body
+        body.update({k: v for k, v in area_param.items() if v is not None})
 
+        headers = {
+            "Accept": "text/csv",
+            "API-Version": "1",
+            "Content-Type": "application/json",
+        }
+
+        response = None
         try:
             logger.debug(
-                f"Making API request for {date_from} to {date_to}, determinand={determinand}"
+                f"Making API POST request for {date_from} to {date_to}, "
+                f"determinand={determinand}, body={body}"
             )
-            response = self.session.get(
+
+            response = self.session.post(
                 self.base_url,
-                params=params,
+                json=body,
                 headers=headers,
                 timeout=self.timeout,
             )
+
+            # Log response details for debugging
+            logger.debug(
+                f"Response status: {response.status_code}, URL: {response.url}"
+            )
+
             response.raise_for_status()
 
             # Parse CSV response
@@ -162,6 +178,24 @@ class EAWaterQualityAPI:
                 logger.warning(f"Empty response for {date_from} to {date_to}")
                 return None
 
+        except requests.exceptions.HTTPError as e:
+            if response is not None:
+                logger.error(
+                    f"HTTP error {response.status_code} for {date_from} to {date_to}: {str(e)}"
+                )
+                logger.error(f"Response content: {response.text[:500]}")
+                warnings.warn(
+                    f"HTTP {response.status_code} error for {date_from} to {date_to}. "
+                    f"Check logs for details."
+                )
+            else:
+                logger.error(
+                    f"HTTP error for {date_from} to {date_to}: {str(e)}"
+                )
+                warnings.warn(
+                    f"HTTP error for {date_from} to {date_to}: {str(e)}"
+                )
+            return None
         except requests.exceptions.RequestException as e:
             logger.error(
                 f"Request failed for {date_from} to {date_to}: {str(e)}"
@@ -225,13 +259,17 @@ class EAWaterQualityAPI:
 
         # Prepare area parameter
         if polygon is not None:
+            # Convert polygon to proper format if needed
             if isinstance(polygon, dict):
-                polygon_str = json.dumps(polygon)
+                # If it's already a dict, use it directly (API expects JSON object, not string)
+                area_param = {"polygon": polygon}
             else:
-                polygon_str = polygon
-            area_param = {"polygon": polygon_str}
+                # If it's a string, parse it to dict
+                area_param = {"polygon": json.loads(polygon)}
+            logger.debug("Using polygon filter")
         else:
             area_param = {"precannedArea": area}
+            logger.debug(f"Using precannedArea filter: {area}")
 
         # Generate month ranges
         month_ranges = self._generate_month_ranges(start_date, end_date)

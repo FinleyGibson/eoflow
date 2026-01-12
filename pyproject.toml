@@ -9,6 +9,7 @@ dependencies = [
     "pandas>=2.0.0",
     "requests>=2.31.0",
     "python-dateutil>=2.8.0",
+    "geopandas>=1.1.1",
 ]
 
 [project.scripts]
@@ -23,6 +24,7 @@ packages = ["src/eoflow", "scripts"]
 
 [dependency-groups]
 dev = [
+    "geopandas>=1.1.1",
     "ipython>=8.12.0",
     "pytest>=8.0.0",
 ]
