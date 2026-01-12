@@ -14,7 +14,7 @@ from platformdirs import user_config_dir
 
 def _get_logger():
     """Lazy logger to avoid circular import."""
-    from eoflow.logging import get_logger
+    from eoflow.log_utils import get_logger
 
     return get_logger(__name__)
 

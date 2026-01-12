@@ -3,17 +3,22 @@ Environment Agency Water Quality Data API Client
 
 A Python module to fetch water quality monitoring data from the Environment Agency's
 Water Quality API. This module handles API pagination, supports multiple determinands,
-and can filter data by geographic area (predefined areas or custom polygons).
+and can filter data by geographic area using precanned area codes.
 
 API Documentation:
-- https://gist.github.com/canwaf/2afa25fc6160efb25ac72b7acd60278d
 - https://environment.data.gov.uk/water-quality-beta/api-docs
+- https://gist.github.com/canwaf/2afa25fc6160efb25ac72b7acd60278d
 
 Common Determinands:
 - 0076: Temperature of Water
 - 0077: Conductivity at 25°C
 - 0180: Orthophosphate, reactive as P
 - 6396: Turbidity (NTU)
+
+Common Area Codes (precannedArea parameter):
+- "environment_agency,DCS": Environment Agency DCS area
+- "environment_agency,SWX": Southwest region (Devon, Cornwall, Somerset, Dorset)
+- "local_authority,E06000002": Example local authority area
 
 Author: Adapted from R code by Francis Rowney
 Last Updated: 2025
@@ -31,7 +36,7 @@ import requests
 from dateutil.relativedelta import relativedelta
 
 from eoflow.config import get_config
-from eoflow.logging import get_logger
+from eoflow.log_utils import get_logger
 
 # Get logger for this module
 logger = get_logger(__name__)
@@ -83,36 +88,40 @@ class EAWaterQualityAPI:
         )
 
     def _generate_month_ranges(
-        self, start_date: datetime, end_date: datetime
+        self,
+        start_date: datetime,
+        end_date: datetime,
     ) -> List[Tuple[datetime, datetime]]:
         """
-        Generate a list of month start and end date pairs.
+        Generate a list of (month_start, month_end) tuples for a date range.
 
         Args:
-            start_date: Start date for data retrieval
-            end_date: End date for data retrieval
+            start_date: Start date (datetime object)
+            end_date: End date (datetime object)
 
         Returns:
-            List of (month_start, month_end) tuples
+            List of tuples with (month_start, month_end) datetime objects
         """
-        ranges = []
+        month_ranges = []
         current = start_date
 
-        while current <= end_date:
+        while current < end_date:
+            month_start = current
             month_end = min(
-                current + relativedelta(months=1) - timedelta(days=1), end_date
+                (current + relativedelta(months=1)) - timedelta(days=1),
+                end_date,
             )
-            ranges.append((current, month_end))
-            current = current + relativedelta(months=1)
+            month_ranges.append((month_start, month_end))
+            current = month_end + timedelta(days=1)
 
-        return ranges
+        return month_ranges
 
     def _make_request(
         self,
         determinand: str,
         date_from: str,
         date_to: str,
-        area_param: Dict[str, Any],
+        precanned_area: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Optional[pd.DataFrame]:
         """
@@ -122,7 +131,7 @@ class EAWaterQualityAPI:
             determinand: Determinand code (e.g., "0076")
             date_from: Start date in YYYY-MM-DD format
             date_to: End date in YYYY-MM-DD format
-            area_param: Dictionary with area parameters (e.g., {"precannedArea": "..."} or {"polygon": "..."})
+            precanned_area: Precanned area code (e.g., "environment_agency,DCS")
             limit: Maximum number of records to return
 
         Returns:
@@ -131,33 +140,33 @@ class EAWaterQualityAPI:
         if limit is None:
             limit = self.max_limit
 
-        # Build request body - API requires POST with JSON body
-        body = {
+        # Build query parameters for POST request
+        params = {
             "determinand": determinand,
             "dateFrom": date_from,
             "dateTo": date_to,
             "limit": limit,
         }
 
-        # Add area parameters to body
-        body.update({k: v for k, v in area_param.items() if v is not None})
+        # Add precanned area if provided
+        if precanned_area is not None:
+            params["precannedArea"] = precanned_area
 
         headers = {
             "Accept": "text/csv",
             "API-Version": "1",
-            "Content-Type": "application/json",
         }
 
         response = None
         try:
             logger.debug(
                 f"Making API POST request for {date_from} to {date_to}, "
-                f"determinand={determinand}, body={body}"
+                f"determinand={determinand}, precannedArea={precanned_area}"
             )
 
             response = self.session.post(
                 self.base_url,
-                json=body,
+                params=params,
                 headers=headers,
                 timeout=self.timeout,
             )
@@ -211,7 +220,6 @@ class EAWaterQualityAPI:
         start_date: Union[str, datetime],
         end_date: Union[str, datetime],
         area: Optional[str] = None,
-        polygon: Optional[Union[Dict, str]] = None,
         verbose: bool = True,
     ) -> pd.DataFrame:
         """
@@ -230,16 +238,15 @@ class EAWaterQualityAPI:
             end_date: End date (YYYY-MM-DD string or datetime object)
             area: Precanned area code. Examples:
                   - "environment_agency,DCS" for EA/Natural England areas
+                  - "environment_agency,SWX" for Southwest region (includes Devon)
                   - "local_authority,E06000002" for local authority areas
-            polygon: GeoJSON polygon (dict or JSON string) defining the area of interest.
-                     If provided, takes precedence over 'area' parameter.
             verbose: If True, print progress messages
 
         Returns:
             DataFrame with water quality observations
 
         Raises:
-            ValueError: If neither area nor polygon is provided
+            ValueError: If no area is provided
         """
         # Convert string dates to datetime
         if isinstance(start_date, str):
@@ -247,29 +254,15 @@ class EAWaterQualityAPI:
         if isinstance(end_date, str):
             end_date = datetime.strptime(end_date, "%Y-%m-%d")
 
-        # Validate area parameters
-        if area is None and polygon is None:
-            logger.error("Neither area nor polygon provided")
-            raise ValueError("Either 'area' or 'polygon' must be provided")
+        # Validate area parameter
+        if area is None:
+            logger.error("No area provided")
+            raise ValueError("'area' parameter must be provided")
 
         logger.info(
             f"Fetching data for determinand {determinand} from {start_date.strftime('%Y-%m-%d')} "
-            f"to {end_date.strftime('%Y-%m-%d')}"
+            f"to {end_date.strftime('%Y-%m-%d')} for area {area}"
         )
-
-        # Prepare area parameter
-        if polygon is not None:
-            # Convert polygon to proper format if needed
-            if isinstance(polygon, dict):
-                # If it's already a dict, use it directly (API expects JSON object, not string)
-                area_param = {"polygon": polygon}
-            else:
-                # If it's a string, parse it to dict
-                area_param = {"polygon": json.loads(polygon)}
-            logger.debug("Using polygon filter")
-        else:
-            area_param = {"precannedArea": area}
-            logger.debug(f"Using precannedArea filter: {area}")
 
         # Generate month ranges
         month_ranges = self._generate_month_ranges(start_date, end_date)
@@ -286,7 +279,7 @@ class EAWaterQualityAPI:
                 determinand=determinand,
                 date_from=month_start.strftime("%Y-%m-%d"),
                 date_to=month_end.strftime("%Y-%m-%d"),
-                area_param=area_param,
+                precanned_area=area,
             )
 
             if df is not None and not df.empty:
@@ -325,7 +318,6 @@ class EAWaterQualityAPI:
         start_date: Union[str, datetime],
         end_date: Union[str, datetime],
         area: Optional[str] = None,
-        polygon: Optional[Union[Dict, str]] = None,
         verbose: bool = True,
     ) -> pd.DataFrame:
         """
@@ -337,7 +329,6 @@ class EAWaterQualityAPI:
             start_date: Start date (YYYY-MM-DD string or datetime object)
             end_date: End date (YYYY-MM-DD string or datetime object)
             area: Precanned area code
-            polygon: GeoJSON polygon defining the area of interest
             verbose: If True, print progress messages
 
         Returns:
@@ -356,7 +347,6 @@ class EAWaterQualityAPI:
                 start_date=start_date,
                 end_date=end_date,
                 area=area,
-                polygon=polygon,
                 verbose=verbose,
             )
 
@@ -372,105 +362,105 @@ class EAWaterQualityAPI:
                     "determinand.prefLabel",
                     "unit",
                 ]
-                cols_to_drop = [
-                    col for col in cols_to_drop if col in df.columns
-                ]
+                cols_to_drop = [col for col in cols_to_drop if col in df.columns]
                 df = df.drop(columns=cols_to_drop)
 
                 df_list.append(df)
 
-        # Join all dataframes
+            # Add delay between determinand requests
+            time.sleep(self.delay)
+
         if not df_list:
             logger.warning("No data retrieved for any determinands")
+            warnings.warn("No data retrieved for any determinands")
             return pd.DataFrame()
 
+        # Join dataframes on common columns
         if len(df_list) == 1:
-            return df_list[0]
+            result = df_list[0]
+        else:
+            # Full outer join on common identifier columns
+            result = df_list[0]
+            for df in df_list[1:]:
+                # Find columns common to both dataframes
+                common_cols = list(set(result.columns) & set(df.columns))
 
-        # Merge on common columns (all except the renamed result columns)
-        logger.info(f"Merging {len(df_list)} determinand datasets")
-        result = df_list[0]
-        for df in df_list[1:]:
-            # Find common columns for merging
-            common_cols = list(set(result.columns) & set(df.columns))
-            if common_cols:
-                result = pd.merge(result, df, on=common_cols, how="outer")
+                # Filter to essential columns for merging (exclude result columns)
+                merge_cols = [col for col in common_cols if col not in
+                             ["result", "Temp Water", "Cond @ 25C", "Orthophospht", "TurbidityNTU"]]
 
-        logger.info(f"Merged dataset shape: {result.shape}")
+                if merge_cols:
+                    result = result.merge(df, on=merge_cols, how="outer")
+                else:
+                    # If no common columns, concatenate instead
+                    result = pd.concat([result, df], ignore_index=True)
+
+        logger.info(f"Combined data shape: {result.shape}")
         return result
 
     def filter_by_polygon(
         self,
         df: pd.DataFrame,
-        polygon: Union[Dict, List[Tuple[float, float]]],
+        polygon: List[Tuple[float, float]],
         lat_col: str = "sample.samplingPoint.latitude",
         lon_col: str = "sample.samplingPoint.longitude",
     ) -> pd.DataFrame:
         """
-        Filter a DataFrame to only include points within a polygon.
+        Filter observations by a geographic polygon.
 
-        This is useful when the API doesn't support polygon filtering directly,
-        or as a post-processing step to refine results.
+        Requires shapely to be installed.
 
         Args:
-            df: DataFrame with latitude and longitude columns
-            polygon: Either a GeoJSON-style polygon dict or a list of (lon, lat) tuples
-            lat_col: Name of the latitude column
-            lon_col: Name of the longitude column
+            df: DataFrame with observation data
+            polygon: List of (lon, lat) tuples defining a polygon
+            lat_col: Name of latitude column
+            lon_col: Name of longitude column
 
         Returns:
-            Filtered DataFrame
+            Filtered DataFrame with only observations within the polygon
 
-        Note:
-            Requires shapely to be installed: pip install shapely
+        Raises:
+            ImportError: If shapely is not installed
+            ValueError: If unexpected data type is provided
         """
         try:
-            from shapely.geometry import Point, Polygon
+            from shapely.geometry import Point, Polygon as ShapelyPolygon
         except ImportError:
-            logger.error("shapely package not found")
-            raise ImportError(
-                "shapely is required for polygon filtering. "
-                "Install it with: pip install shapely"
-            )
+            raise ImportError("shapely is required for polygon filtering")
 
-        logger.info("Filtering data by polygon")
+        if not isinstance(df, pd.DataFrame):
+            logger.error(f"Expected DataFrame, got {type(df)}")
+            raise ValueError("Input must be a pandas DataFrame")
 
-        # Convert polygon to shapely Polygon
-        if isinstance(polygon, dict):
-            # Assume GeoJSON format
-            if "coordinates" in polygon:
-                coords = polygon["coordinates"][0]
-            else:
-                coords = polygon
-        else:
-            coords = polygon
+        if df.empty:
+            logger.warning("Input DataFrame is empty")
+            return df
 
-        poly = Polygon(coords)
+        # Create polygon
+        polygon_shape = ShapelyPolygon(polygon)
 
-        # Convert lat/lon to numeric
+        # Convert lat/lon columns to numeric
         df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
         df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
 
         # Filter points within polygon
-        mask = df.apply(
-            lambda row: poly.contains(Point(row[lon_col], row[lat_col])), axis=1
-        )
+        def point_in_polygon(row):
+            try:
+                if pd.isna(row[lat_col]) or pd.isna(row[lon_col]):
+                    return False
+                point = Point(row[lon_col], row[lat_col])
+                return polygon_shape.contains(point)
+            except Exception as e:
+                logger.debug(f"Error checking point: {e}")
+                return False
 
-        filtered_df = df[mask].copy()
+        mask = df.apply(point_in_polygon, axis=1)
+        filtered_df = df[mask]
+
         logger.info(
-            f"Filtered from {len(df)} to {len(filtered_df)} points within polygon"
+            f"Filtered {len(df)} observations to {len(filtered_df)} within polygon"
         )
-        if isinstance(filtered_df, pd.DataFrame):
-            return filtered_df
-        elif isinstance(filtered_df, pd.Series):
-            return filtered_df.to_frame()
-        elif isinstance(filtered_df, pd.Index):
-            return filtered_df.to_frame()
-        else:
-            logger.error(
-                f"Unexpected data type after filtering: {type(filtered_df)}"
-            )
-            raise ValueError("Unexpected data type after filtering")
+        return filtered_df
 
 
 # Convenience function for simple use cases
@@ -479,8 +469,9 @@ def get_ea_water_quality(
     start_date: str,
     end_date: str,
     area: Optional[str] = None,
-    polygon: Optional[Union[Dict, str]] = None,
     verbose: bool = True,
+    timeout: Optional[int] = None,
+    delay: Optional[float] = None,
 ) -> pd.DataFrame:
     """
     Convenience function to fetch EA water quality data with minimal setup.
@@ -492,39 +483,67 @@ def get_ea_water_quality(
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
         area: Precanned area code (e.g., "environment_agency,DCS")
-        polygon: GeoJSON polygon for spatial filtering
+              For Devon: Use "environment_agency,SWX" (Southwest region)
         verbose: Print progress messages
+        timeout: Request timeout in seconds (default: 60)
+        delay: Delay between requests in seconds (default: 1.0)
 
     Returns:
         DataFrame with water quality data
 
     Example:
-        >>> # Get temperature data for a specific EA area
+        >>> # Get temperature data for Southwest region (includes Devon)
         >>> df = get_ea_water_quality(
         ...     determinand="0076",
         ...     start_date="2024-01-01",
         ...     end_date="2024-12-31",
-        ...     area="environment_agency,DCS"
+        ...     area="environment_agency,SWX"
         ... )
     """
     logger.debug(f"Convenience function called for determinand {determinand}")
-    api = EAWaterQualityAPI()
+    api = EAWaterQualityAPI(timeout=timeout, delay=delay)
     return api.get_data(
         determinand=determinand,
         start_date=start_date,
         end_date=end_date,
         area=area,
-        polygon=polygon,
         verbose=verbose,
     )
 
 
 # Example usage
 if __name__ == "__main__":
-    # Example 1: Fetch data for a single determinand using precanned area
-    api = EAWaterQualityAPI()
+    import logging
+    from pathlib import Path
 
-    # Environment Agency area
+    # create test logger
+    logger = logging.getLogger(f"src{__file__.split("src")[-1]}: {__name__}")
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    test_config = {
+        "api": {
+            "ea_base_url": "https://environment.data.gov.uk/water-quality/data/observation?",
+            "ea_max_limit": 2500,
+            "ea_api_delay": 0.5,
+            "ea_api_timeout": 120,
+            "max_retries": 5,
+        }
+    }
+
+    # Example 1: Fetch data for a single determinand using precanned area
+    api = EAWaterQualityAPI(
+        base_url=test_config["api"]["ea_base_url"],
+        max_limit=test_config["api"]["ea_max_limit"],
+        delay=test_config["api"]["ea_api_delay"],
+        timeout=test_config["api"]["ea_api_timeout"],
+    )
+
+    # Environment Agency DCS area
     temp_data = api.get_data(
         determinand="0076",  # Temperature of Water
         start_date="2024-01-01",
@@ -533,7 +552,8 @@ if __name__ == "__main__":
     )
 
     logger.info(f"Retrieved {len(temp_data)} temperature observations")
-    logger.info(f"Sample data:\n{temp_data.head()}")
+    if not temp_data.empty:
+        logger.info(f"Sample data:\n{temp_data.head()}")
 
     # Example 2: Fetch multiple determinands
     determinands = {
@@ -547,42 +567,23 @@ if __name__ == "__main__":
         determinands=determinands,
         start_date="2024-01-01",
         end_date="2024-03-31",
-        area="local_authority,E06000002",
+        area="environment_agency,DCS",
     )
 
     logger.info(f"Combined data shape: {combined_data.shape}")
 
-    # Example 3: Using a custom polygon (GeoJSON format)
-    # This is a simple square polygon as an example
-    custom_polygon = {
-        "type": "Polygon",
-        "coordinates": [
-            [
-                [-2.0, 51.0],
-                [-2.0, 52.0],
-                [-1.0, 52.0],
-                [-1.0, 51.0],
-                [-2.0, 51.0],
-            ]
-        ],
-    }
+    # Example 3: Using convenience function
+    df = get_ea_water_quality(
+        determinand="0076",
+        start_date="2024-01-01",
+        end_date="2024-03-31",
+        area="environment_agency,DCS",
+        timeout=120,
+    )
 
-    # Note: Check API documentation to see if polygon parameter is supported
-    # If not, fetch with a broader area and use filter_by_polygon()
 
-    # Example 4: Post-process filtering with polygon
-    # If API doesn't support polygon directly, fetch broader area and filter
-    try:
-        filtered_data = api.filter_by_polygon(
-            temp_data, polygon=custom_polygon["coordinates"][0]
-        )
-        logger.info(
-            f"Filtered to {len(filtered_data)} observations within polygon"
-        )
-    except ImportError:
-        logger.warning(
-            "shapely not installed - skipping polygon filtering example"
-        )
+    logger.info(f"Retrieved {len(df)} observations using convenience function")
+    if not df.empty:
+        df.to_csv("ea_water_quality.csv", index=False)
 
-    # Export to CSV
-    # combined_data.to_csv("ea_water_quality.csv", index=False)
+    logger.info(f"Script {__file__} completed successfully!")

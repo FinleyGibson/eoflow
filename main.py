@@ -1,4 +1,4 @@
-from eoflow.logging import get_logger
+from eoflow.log_utils import get_logger
 
 logger = get_logger(__name__)
 

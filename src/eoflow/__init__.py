@@ -1,5 +1,5 @@
 from eoflow.config import Config
-from eoflow.logging import setup_logging
+from eoflow.log_utils import setup_logging
 from eoflow.utils import PROJECT_ROOT
 
 __all__ = [
