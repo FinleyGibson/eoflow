@@ -4,6 +4,34 @@ This directory contains example scripts demonstrating how to use the various com
 
 ## Available Examples
 
+### EA Water Quality API - REST API Example (`ea_api_example.py`)
+
+Example script demonstrating how to make HTTP requests to the FastAPI endpoints for fetching EA water quality data within a polygon.
+
+**Examples included:**
+
+1. **Single Determinand** - Fetch water temperature data within a polygon
+2. **Multiple Determinands** - Fetch multiple parameters (temperature, conductivity, orthophosphate)
+3. **Custom Polygon** - Using a smaller, focused polygon area
+4. **Error Handling** - Demonstrate validation and error responses
+
+**Requirements:**
+
+- FastAPI server running (`uvicorn eoflow.api:app --reload`)
+- `requests` package (`pip install requests`)
+
+**Usage:**
+
+```bash
+# Start the API server first
+uvicorn eoflow.api:app --reload
+
+# Then in another terminal, run the example
+python examples/ea_api_example.py
+```
+
+**Best for:** Learning how to interact with the EOFlow REST API.
+
 ### EA Water Quality API - Quick Reference (`ea_quick_reference.py`)
 
 A concise, copy-paste ready reference guide with minimal examples for common tasks.
@@ -68,6 +96,7 @@ python -c "from examples.ea_water_quality_example import example_1_simple_query;
 
 ## API Documentation
 
+- [EOFlow REST API Documentation](../docs/API.md)
 - [EA Water Quality API Documentation](https://environment.data.gov.uk/water-quality-beta/api-docs)
 - [API Usage Guide (Gist)](https://gist.github.com/canwaf/2afa25fc6160efb25ac72b7acd60278d)
 
