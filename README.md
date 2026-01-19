@@ -14,7 +14,8 @@ Pipeline for modeling water quality form Earth Observation data.
     - [ ] Build Graph representation of rivers
     - [ ] Implement distance measurement metrics
     - [ ] Get Citizen Scientist Data
-    - [ ] Get Environment Agency Data
+    - [x] Get Environment Agency Data
+        - [ ] Cache based on Union-Interseciton + Time (this must have been done before!)
     - [ ] Add
 - [ ] Model water quality form EO data.
     - [ ] Graph Gaussian process
