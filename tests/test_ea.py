@@ -126,17 +126,17 @@ class TestMakeRequest:
 1,0076,15.5,2024-01-01T10:00:00
 2,0076,16.2,2024-01-01T11:00:00"""
 
-        with patch.object(api.session, "get") as mock_get:
+        with patch.object(api.session, "post") as mock_post:
             mock_response = Mock()
             mock_response.text = csv_data
             mock_response.raise_for_status = Mock()
-            mock_get.return_value = mock_response
+            mock_post.return_value = mock_response
 
             result = api._make_request(
                 determinand="0076",
                 date_from="2024-01-01",
                 date_to="2024-01-31",
-                area_param={"precannedArea": "test_area"},
+                precanned_area="test_area",
             )
 
             assert result is not None
@@ -148,17 +148,17 @@ class TestMakeRequest:
         """Test handling of empty API response."""
         api = EAWaterQualityAPI()
 
-        with patch.object(api.session, "get") as mock_get:
+        with patch.object(api.session, "post") as mock_post:
             mock_response = Mock()
             mock_response.text = ""
             mock_response.raise_for_status = Mock()
-            mock_get.return_value = mock_response
+            mock_post.return_value = mock_response
 
             result = api._make_request(
                 determinand="0076",
                 date_from="2024-01-01",
                 date_to="2024-01-31",
-                area_param={"precannedArea": "test_area"},
+                precanned_area="test_area",
             )
 
             assert result is None
@@ -167,17 +167,17 @@ class TestMakeRequest:
         """Test handling of API request errors."""
         api = EAWaterQualityAPI()
 
-        with patch.object(api.session, "get") as mock_get:
+        with patch.object(api.session, "post") as mock_post:
             from requests.exceptions import RequestException
 
-            mock_get.side_effect = RequestException("API Error")
+            mock_post.side_effect = RequestException("API Error")
 
             with pytest.warns(UserWarning):
                 result = api._make_request(
                     determinand="0076",
                     date_from="2024-01-01",
                     date_to="2024-01-31",
-                    area_param={"precannedArea": "test_area"},
+                    precanned_area="test_area",
                 )
 
             assert result is None
@@ -186,22 +186,22 @@ class TestMakeRequest:
         """Test that correct parameters are passed to API."""
         api = EAWaterQualityAPI()
 
-        with patch.object(api.session, "get") as mock_get:
+        with patch.object(api.session, "post") as mock_post:
             mock_response = Mock()
             mock_response.text = "id,result\n1,10.5"
             mock_response.raise_for_status = Mock()
-            mock_get.return_value = mock_response
+            mock_post.return_value = mock_response
 
             api._make_request(
                 determinand="0076",
                 date_from="2024-01-01",
                 date_to="2024-01-31",
-                area_param={"precannedArea": "test_area"},
+                precanned_area="test_area",
                 limit=1000,
             )
 
-            # Check that get was called with correct parameters
-            call_args = mock_get.call_args
+            # Check that post was called with correct parameters
+            call_args = mock_post.call_args
             assert call_args[1]["params"]["determinand"] == "0076"
             assert call_args[1]["params"]["dateFrom"] == "2024-01-01"
             assert call_args[1]["params"]["dateTo"] == "2024-01-31"
@@ -213,10 +213,10 @@ class TestGetData:
     """Tests for the main get_data method."""
 
     def test_get_data_requires_area_or_polygon(self):
-        """Test that either area or polygon must be provided."""
+        """Test that area must be provided."""
         api = EAWaterQualityAPI()
 
-        with pytest.raises(ValueError, match="Either 'area' or 'polygon'"):
+        with pytest.raises(ValueError, match="'area' parameter must be provided"):
             api.get_data(
                 determinand="0076",
                 start_date="2024-01-01",
@@ -249,16 +249,9 @@ class TestGetData:
             assert "phenomenonTime" in result.columns
             assert "Date" in result.columns
 
-    def test_get_data_with_polygon_dict(self):
-        """Test fetching data with polygon as dict."""
+    def test_get_data_with_custom_area(self):
+        """Test fetching data with custom area code."""
         api = EAWaterQualityAPI()
-
-        polygon = {
-            "type": "Polygon",
-            "coordinates": [
-                [[-2.0, 51.0], [-2.0, 52.0], [-1.0, 51.0], [-2.0, 51.0]]
-            ],
-        }
 
         csv_data = """id,result,phenomenonTime
 1,15.5,2024-01-01T10:00:00"""
@@ -272,20 +265,18 @@ class TestGetData:
                 determinand="0076",
                 start_date="2024-01-01",
                 end_date="2024-01-31",
-                polygon=polygon,
+                area="environment_agency,SWX",
                 verbose=False,
             )
 
-            # Check that polygon was converted to JSON string
+            # Check that area was passed correctly
             call_args = mock_request.call_args
-            assert "polygon" in call_args[1]["area_param"]
-            assert isinstance(call_args[1]["area_param"]["polygon"], str)
+            assert call_args[1]["precanned_area"] == "environment_agency,SWX"
+            assert len(result) == 1
 
-    def test_get_data_with_polygon_string(self):
-        """Test fetching data with polygon as JSON string."""
+    def test_get_data_calls_make_request_correctly(self):
+        """Test that get_data calls _make_request with correct parameters."""
         api = EAWaterQualityAPI()
-
-        polygon_str = '{"type": "Polygon", "coordinates": [[[-2.0, 51.0]]]}'
 
         csv_data = """id,result,phenomenonTime
 1,15.5,2024-01-01T10:00:00"""
@@ -299,10 +290,12 @@ class TestGetData:
                 determinand="0076",
                 start_date="2024-01-01",
                 end_date="2024-01-31",
-                polygon=polygon_str,
+                area="test_area",
                 verbose=False,
             )
 
+            # Check _make_request was called with precanned_area
+            mock_request.assert_called()
             assert len(result) == 1
 
     def test_get_data_datetime_conversion(self):
@@ -530,34 +523,23 @@ class TestFilterByPolygon:
         except ImportError:
             pytest.skip("shapely not installed")
 
-    def test_filter_by_polygon_with_geojson(self):
-        """Test filtering with GeoJSON polygon."""
+    def test_filter_by_polygon_empty_dataframe(self):
+        """Test filtering with empty DataFrame."""
         api = EAWaterQualityAPI()
 
-        data = {
-            "id": [1, 2],
-            "sample.samplingPoint.latitude": ["51.5", "52.0"],
-            "sample.samplingPoint.longitude": ["-1.5", "-1.5"],
-            "result": ["10", "20"],
-        }
-        df = pd.DataFrame(data)
+        df = pd.DataFrame()
 
-        geojson_polygon = {
-            "type": "Polygon",
-            "coordinates": [
-                [
-                    (-2.0, 51.0),
-                    (-2.0, 52.5),
-                    (-1.0, 52.5),
-                    (-1.0, 51.0),
-                    (-2.0, 51.0),
-                ]
-            ],
-        }
+        polygon = [
+            (-2.0, 51.0),
+            (-2.0, 52.5),
+            (-1.0, 52.5),
+            (-1.0, 51.0),
+            (-2.0, 51.0),
+        ]
 
         try:
-            result = api.filter_by_polygon(df, geojson_polygon)
-            assert len(result) == 2
+            result = api.filter_by_polygon(df, polygon)
+            assert result.empty
         except ImportError:
             pytest.skip("shapely not installed")
 
@@ -565,8 +547,12 @@ class TestFilterByPolygon:
         """Test that ImportError is raised when shapely not available."""
         api = EAWaterQualityAPI()
 
-        df = pd.DataFrame({"id": [1]})
-        polygon = [(-2.0, 51.0), (-2.0, 52.0), (-1.0, 51.0)]
+        df = pd.DataFrame({
+            "id": [1],
+            "sample.samplingPoint.latitude": ["51.5"],
+            "sample.samplingPoint.longitude": ["-1.5"],
+        })
+        polygon = [(-2.0, 51.0), (-2.0, 52.0), (-1.0, 51.0), (-2.0, 51.0)]
 
         # Mock the import to fail
         import sys
