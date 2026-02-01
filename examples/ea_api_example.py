@@ -43,7 +43,7 @@ def example_1_single_determinand():
         },
         "determinand": "0076",  # Water Temperature
         "start_date": "2024-01-01",
-        "end_date": "2024-01-31",
+        "end_date": "2025-01-31",
         "area": "environment_agency,SWX",  # Southwest region
         "verbose": False
     }
