@@ -236,17 +236,20 @@ class EAWaterQualityAPI:
             determinand: Determinand code (e.g., "0076" for water temperature)
             start_date: Start date (YYYY-MM-DD string or datetime object)
             end_date: End date (YYYY-MM-DD string or datetime object)
-            area: Precanned area code. Examples:
+            area: Optional. Precanned area code. If None, fetches data from all areas.
+                  Examples:
                   - "environment_agency,DCS" for EA/Natural England areas
-                  - "environment_agency,SWX" for Southwest region (includes Devon)
+                  - "environment_agency,SWX" for Southwest region (may return 400 errors)
                   - "local_authority,E06000002" for local authority areas
+                  - None to fetch all areas (recommended for polygon filtering)
             verbose: If True, print progress messages
 
         Returns:
             DataFrame with water quality observations
 
-        Raises:
-            ValueError: If no area is provided
+        Note:
+            Precanned area codes may return 400 errors. For geographic filtering,
+            consider fetching all areas (area=None) and using filter_by_polygon().
         """
         # Convert string dates to datetime
         if isinstance(start_date, str):
@@ -254,10 +257,9 @@ class EAWaterQualityAPI:
         if isinstance(end_date, str):
             end_date = datetime.strptime(end_date, "%Y-%m-%d")
 
-        # Validate area parameter
+        # Area parameter is optional - if None, will fetch all areas
         if area is None:
-            logger.error("No area provided")
-            raise ValueError("'area' parameter must be provided")
+            logger.info("No area filter specified - fetching data from all areas")
 
         logger.info(
             f"Fetching data for determinand {determinand} from {start_date.strftime('%Y-%m-%d')} "
@@ -402,26 +404,34 @@ class EAWaterQualityAPI:
         self,
         df: pd.DataFrame,
         polygon: List[Tuple[float, float]],
-        lat_col: str = "sample.samplingPoint.latitude",
-        lon_col: str = "sample.samplingPoint.longitude",
+        lat_col: str = None,
+        lon_col: str = None,
+        easting_col: str = None,
+        northing_col: str = None,
     ) -> pd.DataFrame:
         """
         Filter observations by a geographic polygon.
 
-        Requires shapely to be installed.
+        Requires shapely and pyproj to be installed.
+
+        Auto-detects coordinate columns from the DataFrame. Handles both:
+        - Latitude/Longitude coordinates (WGS84)
+        - Easting/Northing coordinates (British National Grid - EPSG:27700)
 
         Args:
             df: DataFrame with observation data
-            polygon: List of (lon, lat) tuples defining a polygon
-            lat_col: Name of latitude column
-            lon_col: Name of longitude column
+            polygon: List of (lon, lat) tuples defining a polygon in WGS84
+            lat_col: Name of latitude column (auto-detected if None)
+            lon_col: Name of longitude column (auto-detected if None)
+            easting_col: Name of easting column (auto-detected if None)
+            northing_col: Name of northing column (auto-detected if None)
 
         Returns:
             Filtered DataFrame with only observations within the polygon
 
         Raises:
-            ImportError: If shapely is not installed
-            ValueError: If unexpected data type is provided
+            ImportError: If shapely or pyproj is not installed
+            ValueError: If coordinate columns cannot be found or invalid data type
         """
         try:
             from shapely.geometry import Point, Polygon as ShapelyPolygon
@@ -436,25 +446,88 @@ class EAWaterQualityAPI:
             logger.warning("Input DataFrame is empty")
             return df
 
-        # Create polygon
+        # Auto-detect coordinate columns if not provided
+        if lat_col is None or lon_col is None:
+            # Try to find lat/lon columns
+            lat_candidates = [c for c in df.columns if 'latitude' in c.lower()]
+            lon_candidates = [c for c in df.columns if 'longitude' in c.lower()]
+
+            if lat_candidates and lon_candidates:
+                lat_col = lat_candidates[0]
+                lon_col = lon_candidates[0]
+                logger.info(f"Auto-detected lat/lon columns: {lat_col}, {lon_col}")
+            else:
+                # Try to find easting/northing columns
+                easting_candidates = [c for c in df.columns if 'easting' in c.lower()]
+                northing_candidates = [c for c in df.columns if 'northing' in c.lower()]
+
+                if easting_candidates and northing_candidates:
+                    easting_col = easting_candidates[0]
+                    northing_col = northing_candidates[0]
+                    logger.info(f"Auto-detected easting/northing columns: {easting_col}, {northing_col}")
+                else:
+                    raise ValueError(
+                        "Could not auto-detect coordinate columns. "
+                        "Please provide lat_col/lon_col or easting_col/northing_col parameters."
+                    )
+
+        # Create polygon in WGS84
         polygon_shape = ShapelyPolygon(polygon)
 
-        # Convert lat/lon columns to numeric
-        df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
-        df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+        # Determine if we need to convert coordinates
+        use_easting_northing = easting_col is not None and northing_col is not None
 
-        # Filter points within polygon
-        def point_in_polygon(row):
+        if use_easting_northing:
+            # Convert easting/northing to lat/lon
+            logger.info("Converting British National Grid coordinates to WGS84")
             try:
-                if pd.isna(row[lat_col]) or pd.isna(row[lon_col]):
-                    return False
-                point = Point(row[lon_col], row[lat_col])
-                return polygon_shape.contains(point)
-            except Exception as e:
-                logger.debug(f"Error checking point: {e}")
-                return False
+                from pyproj import Transformer
+            except ImportError:
+                raise ImportError("pyproj is required for easting/northing conversion")
 
-        mask = df.apply(point_in_polygon, axis=1)
+            # Create transformer from EPSG:27700 (BNG) to EPSG:4326 (WGS84)
+            transformer = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
+
+            # Convert coordinates to numeric
+            df_copy = df.copy()
+            df_copy[easting_col] = pd.to_numeric(df_copy[easting_col], errors="coerce")
+            df_copy[northing_col] = pd.to_numeric(df_copy[northing_col], errors="coerce")
+
+            # Filter points within polygon
+            def point_in_polygon(row):
+                try:
+                    easting = row[easting_col]
+                    northing = row[northing_col]
+
+                    if pd.isna(easting) or pd.isna(northing):
+                        return False
+
+                    # Convert to WGS84 (lon, lat)
+                    lon, lat = transformer.transform(easting, northing)
+                    point = Point(lon, lat)
+                    return polygon_shape.contains(point)
+                except Exception as e:
+                    logger.debug(f"Error checking point: {e}")
+                    return False
+
+        else:
+            # Use lat/lon directly
+            df_copy = df.copy()
+            df_copy[lat_col] = pd.to_numeric(df_copy[lat_col], errors="coerce")
+            df_copy[lon_col] = pd.to_numeric(df_copy[lon_col], errors="coerce")
+
+            # Filter points within polygon
+            def point_in_polygon(row):
+                try:
+                    if pd.isna(row[lat_col]) or pd.isna(row[lon_col]):
+                        return False
+                    point = Point(row[lon_col], row[lat_col])
+                    return polygon_shape.contains(point)
+                except Exception as e:
+                    logger.debug(f"Error checking point: {e}")
+                    return False
+
+        mask = df_copy.apply(point_in_polygon, axis=1)
         filtered_df = df[mask]
 
         logger.info(
@@ -482,8 +555,11 @@ def get_ea_water_quality(
         determinand: Determinand code (e.g., "0076")
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        area: Precanned area code (e.g., "environment_agency,DCS")
-              For Devon: Use "environment_agency,SWX" (Southwest region)
+        area: Optional. Precanned area code. If None, fetches data from all areas.
+              Note: Precanned area codes may return 400 errors.
+              Examples:
+              - "environment_agency,DCS" for EA/Natural England areas
+              - None to fetch all areas (recommended for polygon filtering)
         verbose: Print progress messages
         timeout: Request timeout in seconds (default: 60)
         delay: Delay between requests in seconds (default: 1.0)
@@ -492,12 +568,12 @@ def get_ea_water_quality(
         DataFrame with water quality data
 
     Example:
-        >>> # Get temperature data for Southwest region (includes Devon)
+        >>> # Get temperature data for all areas (then filter by polygon)
         >>> df = get_ea_water_quality(
         ...     determinand="0076",
         ...     start_date="2024-01-01",
         ...     end_date="2024-12-31",
-        ...     area="environment_agency,SWX"
+        ...     area=None
         ... )
     """
     logger.debug(f"Convenience function called for determinand {determinand}")
