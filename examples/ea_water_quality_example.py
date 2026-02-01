@@ -34,7 +34,7 @@ def example_1_simple_query():
         start_date="2024-01-01",
         end_date="2024-01-31",
         area="environment_agency,SWX",  # Southwest region
-        verbose=True
+        verbose=True,
     )
 
     print(f"\nRetrieved {len(df)} observations")
@@ -49,7 +49,7 @@ def example_2_api_class():
     # Initialize API client with custom settings
     api = EAWaterQualityAPI(
         delay=0.5,  # 0.5 second delay between requests
-        timeout=30   # 30 second timeout
+        timeout=30,  # 30 second timeout
     )
 
     # Fetch conductivity data
@@ -58,7 +58,7 @@ def example_2_api_class():
         start_date="2024-01-01",
         end_date="2024-01-31",
         area="environment_agency,SWX",
-        verbose=False
+        verbose=False,
     )
 
     print(f"\nRetrieved {len(df)} conductivity observations")
@@ -77,7 +77,7 @@ def example_3_multiple_determinands():
     determinands = {
         "0076": "Temperature",
         "0077": "Conductivity",
-        "0180": "Orthophosphate"
+        "0180": "Orthophosphate",
     }
 
     df = api.get_multiple_determinands(
@@ -85,7 +85,7 @@ def example_3_multiple_determinands():
         start_date="2024-01-01",
         end_date="2024-01-31",
         area="environment_agency,SWX",
-        verbose=False
+        verbose=False,
     )
 
     print(f"\nRetrieved {len(df)} observations")
@@ -107,7 +107,7 @@ def example_4_polygon_filtering():
         start_date="2024-01-01",
         end_date="2024-01-31",
         area="environment_agency,SWX",
-        verbose=False
+        verbose=False,
     )
 
     print(f"\nTotal observations before filtering: {len(df)}")
@@ -119,7 +119,7 @@ def example_4_polygon_filtering():
         (-4.5, 51.2),
         (-3.0, 51.2),
         (-3.0, 50.3),
-        (-4.5, 50.3)  # Close the polygon
+        (-4.5, 50.3),  # Close the polygon
     ]
 
     try:
@@ -129,11 +129,15 @@ def example_4_polygon_filtering():
 
         if not filtered_df.empty:
             print(f"\nSample locations:")
-            print(filtered_df[[
-                "sample.samplingPoint.notation",
-                "sample.samplingPoint.latitude",
-                "sample.samplingPoint.longitude"
-            ]].head())
+            print(
+                filtered_df[
+                    [
+                        "sample.samplingPoint.notation",
+                        "sample.samplingPoint.latitude",
+                        "sample.samplingPoint.longitude",
+                    ]
+                ].head()
+            )
     except ImportError:
         print("\nNote: shapely package required for polygon filtering")
         print("Install with: pip install shapely")
@@ -150,7 +154,7 @@ def example_5_data_analysis():
         start_date="2024-01-01",
         end_date="2024-03-31",
         area="environment_agency,SWX",
-        verbose=False
+        verbose=False,
     )
 
     if not df.empty:
@@ -192,4 +196,5 @@ def main():
 
 if __name__ == "__main__":
     import pandas as pd
+
     main()
