@@ -13,18 +13,17 @@ dependencies = [
     "fastapi>=0.128.0",
     "folium>=0.20.0",
     "fiona>=1.10.1",
-    "geopandas>=1.1.1",
     "leaflet>=0.0.3",
     "leafmap>=0.57.9",
     "localtileserver>=0.10.6",
     "matplotlib>=3.10.3",
     "numpy>=2.2.6",
     "pandas>=2.2.3",
-    "pip>=25.3",
     "rasterio>=1.4.3",
     "setuptools>=80.9.0",
     "shapely>=2.1.2",
-    "xarray>=2025.7.1",
+    "pyproj>=3.6.0",
+    "networkx>=3.6.1",
 ]
 
 [project.optional-dependencies]
@@ -37,21 +36,13 @@ dev = [
 
 [project.scripts]
 eoflow-update-config = "scripts.update_config:main"
-]
 
 [build-system]
-requires = ["setuptools>=69", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/eoflow", "scripts"]
-
-[dependency-groups]
-dev = [
-    "geopandas>=1.1.1",
-    "ipython>=8.12.0",
-    "pytest>=8.0.0",
-]
 
 [tool.pytest.ini_options]
 markers = [
