@@ -1,0 +1,24 @@
+# To Do:
+
+- [ ] Water sample data
+    - [ ] Citizen Scientist Data (demo)
+        - [ ] Load and visualise
+        - [ ] Make available via API
+    - [ ] Citizen Scientist Data (real)
+        - [ ] Load and visualise
+        - [ ] Make available via API
+    - [x] EA Data
+        - [x] Load and visualise
+        - [x] Make available via API
+    - [ ] Combine data sources with source annotation (labelled)
+- [ ] River Graph
+    - [x] Generate river graph from maps
+    - [ ] Add Water sample data to graph as nodes
+    - [ ] Convert to Directed graph
+- [ ] Modelling
+    - [ ] Basic interpolation model
+    - [ ] Directed interpolation model
+    - [ ] Weighted interpolation model
+    - [ ] Weighted directed interpolation model
+    - [ ] Graph Neural Network
+    - [ ] Graph Gaussian Process
