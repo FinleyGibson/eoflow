@@ -20,8 +20,8 @@
     - [ ] Graph Neural Network
     - [ ] Graph Gaussian Process
 - [ ] API
-    - [ ] Split tests for EA data into API amd non API
-        - [ ] Ensure passes all tests.
+    - [x] Split tests for EA data into API amd non API
+        - [x] Ensure passes all tests.
     - [ ] Add CS samples to water samples in API.
     - [ ] Package API for Benjamin.
         - [ ] New repo
