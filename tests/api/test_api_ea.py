@@ -9,16 +9,10 @@ Tests cover:
 - Polygon filtering integration
 """
 
-import sys
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pandas as pd
-import pytest
 from fastapi.testclient import TestClient
-
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from eoflow.api import app
 
@@ -30,6 +24,7 @@ class TestEAWaterQualityEndpoint:
 
     def test_ea_water_quality_success(self):
         """Test successful EA water quality request."""
+
         request_data = {
             "polygon": {
                 "coordinates": [
@@ -37,14 +32,14 @@ class TestEAWaterQualityEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
             "area": "environment_agency,SWX",
-            "verbose": False
+            "verbose": False,
         }
 
         # Mock the EA API
@@ -53,13 +48,18 @@ class TestEAWaterQualityEndpoint:
             mock_api_class.return_value = mock_api
 
             # Mock get_data to return sample data
-            sample_data = pd.DataFrame({
-                "id": ["1", "2"],
-                "result": ["15.5", "16.2"],
-                "phenomenonTime": ["2024-01-01T10:00:00", "2024-01-02T11:00:00"],
-                "sample.samplingPoint.latitude": ["50.5", "51.0"],
-                "sample.samplingPoint.longitude": ["-4.0", "-3.5"]
-            })
+            sample_data = pd.DataFrame(
+                {
+                    "id": ["1", "2"],
+                    "result": ["15.5", "16.2"],
+                    "phenomenonTime": [
+                        "2024-01-01T10:00:00",
+                        "2024-01-02T11:00:00",
+                    ],
+                    "sample.samplingPoint.latitude": ["50.5", "51.0"],
+                    "sample.samplingPoint.longitude": ["-4.0", "-3.5"],
+                }
+            )
             mock_api.get_data.return_value = sample_data
 
             # Mock filter_by_polygon to return filtered data
@@ -68,6 +68,29 @@ class TestEAWaterQualityEndpoint:
 
             response = client.post("/ea/water-quality", json=request_data)
 
+            # Verify get_data was called with correct parameters
+            mock_api.get_data.assert_called_once_with(
+                determinand="0076",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                area="environment_agency,SWX",
+                verbose=False,
+            )
+
+            # Verify filter_by_polygon was called with correct polygon coordinates
+            expected_coords = [
+                (-4.5, 50.3),
+                (-4.5, 51.2),
+                (-3.0, 51.2),
+                (-3.0, 50.3),
+                (-4.5, 50.3),
+            ]
+            mock_api.filter_by_polygon.assert_called_once()
+            call_args = mock_api.filter_by_polygon.call_args
+            assert (
+                call_args[0][1] == expected_coords
+            )  # Second argument should be polygon coords
+
             assert response.status_code == 200
             json_response = response.json()
             assert "total_records" in json_response
@@ -75,6 +98,104 @@ class TestEAWaterQualityEndpoint:
             assert "data" in json_response
             assert json_response["total_records"] == 2
             assert json_response["filtered_records"] == 1
+
+    def test_ea_water_quality_verbose_true(self):
+        """Test that verbose parameter is correctly passed through."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-4.5, 50.3],
+                    [-4.5, 51.2],
+                    [-3.0, 51.2],
+                    [-3.0, 50.3],
+                    [-4.5, 50.3],
+                ]
+            },
+            "determinand": "0076",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,SWX",
+            "verbose": True,  # Explicitly set to True
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            sample_data = pd.DataFrame(
+                {
+                    "id": ["1"],
+                    "result": ["15.5"],
+                    "phenomenonTime": ["2024-01-01T10:00:00"],
+                    "sample.samplingPoint.latitude": ["50.5"],
+                    "sample.samplingPoint.longitude": ["-4.0"],
+                }
+            )
+            mock_api.get_data.return_value = sample_data
+            mock_api.filter_by_polygon.return_value = sample_data
+
+            response = client.post("/ea/water-quality", json=request_data)
+
+            # Verify verbose=True was passed through
+            mock_api.get_data.assert_called_once_with(
+                determinand="0076",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                area="environment_agency,SWX",
+                verbose=True,
+            )
+
+            assert response.status_code == 200
+
+    def test_ea_water_quality_all_filtered_out(self):
+        """Test when data is returned but all records are filtered out by polygon."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-4.5, 50.3],
+                    [-4.5, 51.2],
+                    [-3.0, 51.2],
+                    [-3.0, 50.3],
+                    [-4.5, 50.3],
+                ]
+            },
+            "determinand": "0076",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,SWX",
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            # Mock get_data to return sample data
+            sample_data = pd.DataFrame(
+                {
+                    "id": ["1", "2"],
+                    "result": ["15.5", "16.2"],
+                    "phenomenonTime": [
+                        "2024-01-01T10:00:00",
+                        "2024-01-02T11:00:00",
+                    ],
+                    "sample.samplingPoint.latitude": ["50.5", "51.0"],
+                    "sample.samplingPoint.longitude": ["-4.0", "-3.5"],
+                }
+            )
+            mock_api.get_data.return_value = sample_data
+
+            # Mock filter_by_polygon to return empty dataframe (all filtered out)
+            mock_api.filter_by_polygon.return_value = pd.DataFrame()
+
+            response = client.post("/ea/water-quality", json=request_data)
+
+            assert response.status_code == 200
+            json_response = response.json()
+            assert json_response["total_records"] == 2
+            assert json_response["filtered_records"] == 0
+            assert json_response["data"] == []
 
     def test_ea_water_quality_empty_response(self):
         """Test EA water quality request with no data returned."""
@@ -85,13 +206,13 @@ class TestEAWaterQualityEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -119,13 +240,13 @@ class TestEAWaterQualityEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "invalid-date",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -149,13 +270,13 @@ class TestEAWaterQualityEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -163,7 +284,9 @@ class TestEAWaterQualityEndpoint:
             mock_api_class.return_value = mock_api
 
             # Mock ValueError for missing area
-            mock_api.get_data.side_effect = ValueError("'area' parameter must be provided")
+            mock_api.get_data.side_effect = ValueError(
+                "'area' parameter must be provided"
+            )
 
             response = client.post("/ea/water-quality", json=request_data)
 
@@ -175,13 +298,13 @@ class TestEAWaterQualityEndpoint:
             "polygon": {
                 "coordinates": [
                     [-4.5, 50.3],
-                    [-4.5, 51.2]
+                    [-4.5, 51.2],
                 ]  # Only 2 points, need at least 3
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         response = client.post("/ea/water-quality", json=request_data)
@@ -202,17 +325,14 @@ class TestEAWaterQualityMultipleEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
-            "determinands": {
-                "0076": "Temperature",
-                "0077": "Conductivity"
-            },
+            "determinands": {"0076": "Temperature", "0077": "Conductivity"},
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
             "area": "environment_agency,SWX",
-            "verbose": False
+            "verbose": False,
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -220,20 +340,48 @@ class TestEAWaterQualityMultipleEndpoint:
             mock_api_class.return_value = mock_api
 
             # Mock get_multiple_determinands to return sample data
-            sample_data = pd.DataFrame({
-                "phenomenonTime": ["2024-01-01T10:00:00", "2024-01-02T11:00:00"],
-                "Temperature": ["15.5", "16.2"],
-                "Conductivity": ["100", "110"],
-                "sample.samplingPoint.latitude": ["50.5", "51.0"],
-                "sample.samplingPoint.longitude": ["-4.0", "-3.5"]
-            })
+            sample_data = pd.DataFrame(
+                {
+                    "phenomenonTime": [
+                        "2024-01-01T10:00:00",
+                        "2024-01-02T11:00:00",
+                    ],
+                    "Temperature": ["15.5", "16.2"],
+                    "Conductivity": ["100", "110"],
+                    "sample.samplingPoint.latitude": ["50.5", "51.0"],
+                    "sample.samplingPoint.longitude": ["-4.0", "-3.5"],
+                }
+            )
             mock_api.get_multiple_determinands.return_value = sample_data
 
             # Mock filter_by_polygon
             filtered_data = sample_data.iloc[[0]]
             mock_api.filter_by_polygon.return_value = filtered_data
 
-            response = client.post("/ea/water-quality/multiple", json=request_data)
+            response = client.post(
+                "/ea/water-quality/multiple", json=request_data
+            )
+
+            # Verify get_multiple_determinands was called with correct parameters
+            mock_api.get_multiple_determinands.assert_called_once_with(
+                determinands={"0076": "Temperature", "0077": "Conductivity"},
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                area="environment_agency,SWX",
+                verbose=False,
+            )
+
+            # Verify filter_by_polygon was called with correct polygon coordinates
+            expected_coords = [
+                (-4.5, 50.3),
+                (-4.5, 51.2),
+                (-3.0, 51.2),
+                (-3.0, 50.3),
+                (-4.5, 50.3),
+            ]
+            mock_api.filter_by_polygon.assert_called_once()
+            call_args = mock_api.filter_by_polygon.call_args
+            assert call_args[0][1] == expected_coords
 
             assert response.status_code == 200
             json_response = response.json()
@@ -246,6 +394,57 @@ class TestEAWaterQualityMultipleEndpoint:
             assert "0076" in json_response["determinands"]
             assert "0077" in json_response["determinands"]
 
+    def test_ea_water_quality_multiple_all_filtered_out(self):
+        """Test multiple determinands when all data is filtered out by polygon."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-4.5, 50.3],
+                    [-4.5, 51.2],
+                    [-3.0, 51.2],
+                    [-3.0, 50.3],
+                    [-4.5, 50.3],
+                ]
+            },
+            "determinands": {"0076": "Temperature", "0077": "Conductivity"},
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,SWX",
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            # Mock get_multiple_determinands to return sample data
+            sample_data = pd.DataFrame(
+                {
+                    "phenomenonTime": [
+                        "2024-01-01T10:00:00",
+                        "2024-01-02T11:00:00",
+                    ],
+                    "Temperature": ["15.5", "16.2"],
+                    "Conductivity": ["100", "110"],
+                    "sample.samplingPoint.latitude": ["50.5", "51.0"],
+                    "sample.samplingPoint.longitude": ["-4.0", "-3.5"],
+                }
+            )
+            mock_api.get_multiple_determinands.return_value = sample_data
+
+            # Mock filter_by_polygon to return empty dataframe
+            mock_api.filter_by_polygon.return_value = pd.DataFrame()
+
+            response = client.post(
+                "/ea/water-quality/multiple", json=request_data
+            )
+
+            assert response.status_code == 200
+            json_response = response.json()
+            assert json_response["total_records"] == 2
+            assert json_response["filtered_records"] == 0
+            assert json_response["data"] == []
+
     def test_ea_water_quality_multiple_empty_response(self):
         """Test multiple determinands request with no data."""
         request_data = {
@@ -255,16 +454,13 @@ class TestEAWaterQualityMultipleEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
-            "determinands": {
-                "0076": "Temperature",
-                "0077": "Conductivity"
-            },
+            "determinands": {"0076": "Temperature", "0077": "Conductivity"},
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -274,7 +470,9 @@ class TestEAWaterQualityMultipleEndpoint:
             # Mock empty dataframe
             mock_api.get_multiple_determinands.return_value = pd.DataFrame()
 
-            response = client.post("/ea/water-quality/multiple", json=request_data)
+            response = client.post(
+                "/ea/water-quality/multiple", json=request_data
+            )
 
             assert response.status_code == 200
             json_response = response.json()
@@ -292,13 +490,13 @@ class TestEAWaterQualityMultipleEndpoint:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinands": {},  # Empty dict
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -308,7 +506,104 @@ class TestEAWaterQualityMultipleEndpoint:
             # Mock empty result
             mock_api.get_multiple_determinands.return_value = pd.DataFrame()
 
-            response = client.post("/ea/water-quality/multiple", json=request_data)
+            response = client.post(
+                "/ea/water-quality/multiple", json=request_data
+            )
+
+            assert response.status_code == 200
+
+
+class TestPolygonCoordinateHandling:
+    """Tests for polygon coordinate transformation and edge cases."""
+
+    def test_polygon_coordinate_format_conversion(self):
+        """Test that polygon coordinates are correctly converted to tuples."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-1.0, 50.0],
+                    [-1.0, 51.0],
+                    [0.0, 51.0],
+                    [0.0, 50.0],
+                    [-1.0, 50.0],
+                ]
+            },
+            "determinand": "0076",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,EA",
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            # Return non-empty DataFrame so filter_by_polygon is called
+            sample_data = pd.DataFrame(
+                {
+                    "id": ["1"],
+                    "result": ["15.5"],
+                    "phenomenonTime": ["2024-01-01T10:00:00"],
+                    "sample.samplingPoint.latitude": ["50.5"],
+                    "sample.samplingPoint.longitude": ["-0.5"],
+                }
+            )
+            mock_api.get_data.return_value = sample_data
+            mock_api.filter_by_polygon.return_value = sample_data
+
+            response = client.post("/ea/water-quality", json=request_data)
+
+            # Verify polygon coordinates were converted from lists to tuples
+            mock_api.filter_by_polygon.assert_called_once()
+            call_args = mock_api.filter_by_polygon.call_args
+            polygon_arg = call_args[0][1]
+
+            # Check it's a list of tuples (not list of lists)
+            assert all(isinstance(coord, tuple) for coord in polygon_arg)
+            assert polygon_arg == [
+                (-1.0, 50.0),
+                (-1.0, 51.0),
+                (0.0, 51.0),
+                (0.0, 50.0),
+                (-1.0, 50.0),
+            ]
+
+            assert response.status_code == 200
+
+    def test_polygon_with_float_coordinates(self):
+        """Test handling of polygon with various float coordinate formats."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-4.567891, 50.123456],
+                    [-4.567891, 51.234567],
+                    [-3.456789, 51.234567],
+                    [-3.456789, 50.123456],
+                    [-4.567891, 50.123456],
+                ]
+            },
+            "determinand": "0076",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,SWX",
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            sample_data = pd.DataFrame({"id": ["1"]})
+            mock_api.get_data.return_value = sample_data
+            mock_api.filter_by_polygon.return_value = sample_data
+
+            response = client.post("/ea/water-quality", json=request_data)
+
+            # Verify high-precision coordinates are preserved
+            call_args = mock_api.filter_by_polygon.call_args
+            polygon_arg = call_args[0][1]
+            assert polygon_arg[0] == (-4.567891, 50.123456)
 
             assert response.status_code == 200
 
@@ -343,16 +638,11 @@ class TestRequestModels:
     def test_polygon_request_validation(self):
         """Test polygon request requires at least 3 coordinates."""
         request_data = {
-            "polygon": {
-                "coordinates": [
-                    [-4.5, 50.3],
-                    [-4.5, 51.2]
-                ]
-            },
+            "polygon": {"coordinates": [[-4.5, 50.3], [-4.5, 51.2]]},
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         response = client.post("/ea/water-quality", json=request_data)
@@ -367,7 +657,7 @@ class TestRequestModels:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
@@ -386,13 +676,13 @@ class TestRequestModels:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
             # verbose not provided
         }
 
@@ -421,13 +711,13 @@ class TestErrorHandling:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -435,13 +725,17 @@ class TestErrorHandling:
             mock_api_class.return_value = mock_api
 
             # Mock ImportError
-            mock_api.get_data.return_value = pd.DataFrame({
-                "id": ["1"],
-                "result": ["15.5"],
-                "sample.samplingPoint.latitude": ["50.5"],
-                "sample.samplingPoint.longitude": ["-4.0"]
-            })
-            mock_api.filter_by_polygon.side_effect = ImportError("shapely is required")
+            mock_api.get_data.return_value = pd.DataFrame(
+                {
+                    "id": ["1"],
+                    "result": ["15.5"],
+                    "sample.samplingPoint.latitude": ["50.5"],
+                    "sample.samplingPoint.longitude": ["-4.0"],
+                }
+            )
+            mock_api.filter_by_polygon.side_effect = ImportError(
+                "shapely is required"
+            )
 
             response = client.post("/ea/water-quality", json=request_data)
 
@@ -457,13 +751,13 @@ class TestErrorHandling:
                     [-4.5, 51.2],
                     [-3.0, 51.2],
                     [-3.0, 50.3],
-                    [-4.5, 50.3]
+                    [-4.5, 50.3],
                 ]
             },
             "determinand": "0076",
             "start_date": "2024-01-01",
             "end_date": "2024-01-31",
-            "area": "environment_agency,SWX"
+            "area": "environment_agency,SWX",
         }
 
         with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
@@ -477,3 +771,37 @@ class TestErrorHandling:
 
             assert response.status_code == 500
             assert "An error occurred" in response.json()["detail"]
+
+    def test_value_error_handling_explicit(self):
+        """Test explicit ValueError handling with bad parameter values."""
+
+        request_data = {
+            "polygon": {
+                "coordinates": [
+                    [-4.5, 50.3],
+                    [-4.5, 51.2],
+                    [-3.0, 51.2],
+                    [-3.0, 50.3],
+                    [-4.5, 50.3],
+                ]
+            },
+            "determinand": "INVALID",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "area": "environment_agency,SWX",
+        }
+
+        with patch("eoflow.api.EAWaterQualityAPI") as mock_api_class:
+            mock_api = Mock()
+            mock_api_class.return_value = mock_api
+
+            # Mock ValueError from API validation
+            mock_api.get_data.side_effect = ValueError(
+                "Invalid determinand code"
+            )
+
+            response = client.post("/ea/water-quality", json=request_data)
+
+            assert response.status_code == 400
+            assert "Invalid request parameters" in response.json()["detail"]
+            assert "Invalid determinand code" in response.json()["detail"]
