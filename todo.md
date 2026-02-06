@@ -1,11 +1,8 @@
 # To Do:
 
 - [ ] Water sample data
-    - [ ] Citizen Scientist Data (demo)
-        - [ ] Load and visualise
-        - [ ] Make available via API
     - [ ] Citizen Scientist Data (real)
-        - [ ] Load and visualise
+        - [ ] Load and visualise from ArcGIS API
         - [ ] Make available via API
     - [x] EA Data
         - [x] Load and visualise
@@ -22,3 +19,11 @@
     - [ ] Weighted directed interpolation model
     - [ ] Graph Neural Network
     - [ ] Graph Gaussian Process
+- [ ] API
+    - [ ] Split tests for EA data into API amd non API
+        - [ ] Ensure passes all tests.
+    - [ ] Add CS samples to water samples in API.
+    - [ ] Package API for Benjamin.
+        - [ ] New repo
+        - [ ] Transplant required code only
+        - [ ] Rebuild minimalist uv build
