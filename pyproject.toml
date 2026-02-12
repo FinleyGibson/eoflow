@@ -28,7 +28,7 @@ dependencies = [
     "pyproj>=3.6.0",
     "networkx>=3.6.1",
     "platformdirs>=4.3.8",
-    "pysheds @ git+https://github.com/FinleyGibson/pysheds.git",
+    "pysheds",
 ]
 
 [project.optional-dependencies]
@@ -59,3 +59,6 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+pysheds = { git = "https://github.com/FinleyGibson/pysheds.git", rev = "master" }

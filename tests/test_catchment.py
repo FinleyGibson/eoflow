@@ -108,7 +108,7 @@ class TestDelineateCatchmentInputValidation:
 
         with pytest.raises((ValueError, AttributeError)):
             delineate_catchment(
-                point="not a point",  # Invalid type
+                point="not a point",  # type: ignore
                 dem_path=mock_dem_path,
             )
 
@@ -186,7 +186,7 @@ class TestDelineateCatchmentParameters:
         assert params["pit_fill"].default is True
         assert params["resolve_flats"].default is True
         assert params["pit_fill_epsilon"].default == 0.0001
-        assert params["nodata_out"].default == 0
+        assert params["nodata_out"].default is None
 
     def test_custom_parameters_accepted(self):
         """Test that custom parameters can be passed."""
@@ -722,14 +722,14 @@ class TestDelineateCatchmentWorkflow:
         custom_nodata = -1
         delineate_catchment(point=sample_point, dem_path=mock_dem_path, nodata_out=custom_nodata)
 
+        # nodata_out is forwarded to fill_pits and resolve_flats
         assert mock_grid.fill_pits.call_args[1]["nodata_out"] == custom_nodata
         assert mock_grid.resolve_flats.call_args[1]["nodata_out"] == custom_nodata
-        assert mock_grid.resolve_flats.call_args[1]["nodata_in"] == custom_nodata
-        assert mock_grid.flowdir.call_args[1]["nodata_in"] == custom_nodata
-        assert mock_grid.flowdir.call_args[1]["nodata_out"] == custom_nodata
-        assert mock_grid.accumulation.call_args[1]["nodata_in"] == custom_nodata
-        assert mock_grid.accumulation.call_args[1]["nodata_out"] == custom_nodata
-        assert mock_grid.catchment.call_args[1]["nodata_out"] == custom_nodata
+        # flowdir, accumulation, and catchment rely on pysheds defaults
+        # to avoid dtype conflicts (e.g. float nodata on uint8 fdir array)
+        assert "nodata_out" not in mock_grid.flowdir.call_args[1]
+        assert "nodata_out" not in mock_grid.accumulation.call_args[1]
+        assert "nodata_out" not in mock_grid.catchment.call_args[1]
 
     @patch("eoflow.catchment.Grid")
     @patch("eoflow.catchment.shape")

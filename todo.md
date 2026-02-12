@@ -34,3 +34,39 @@
         - [ ] New repo
         - [ ] Transplant required code only
         - [ ] Rebuild minimalist uv build
+
+## For next week
+
+- **Focus initial work on Environment Agency (EA) data**
+    - [ ] Compile and structure the EA dataset.
+    - [ ] Begin feature extraction from this dataset.
+
+- **Prepare model inputs**
+    - [ ] Normalise variables by:
+        - [ ] Catchment area
+        - [ ] Rainfall
+        - [ ] Time of year
+        - [ ] Number of dry days prior
+    - [ ] Incorporate soil type classification:
+        - [ ] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
+        - [ ] Calculate fractional coverage of the 26 soil types per catchment.
+
+- **Integrate rainfall data**
+    - [ ] Use Met Office spatial rainfall data via AWS S3.
+    - [ ] Run Albert’s scripts (`run.sh`, `hdf5toasci`) to extract rainfall for catchment areas.
+
+- **Feature engineering priorities**
+    - [ ] NDVI
+    - [ ] ΔNDWI
+    - [ ] Impervious surfaces (tarmac/concrete)
+    - [ ] Maize crop presence
+    - [ ] Plastic sheeting
+    - [ ] Other erosion-relevant land features
+
+- **Model development**
+    - [ ] Build model linking environmental features + rainfall + catchment characteristics → turbidity.
+    - [ ] Validate model results using citizen science data.
+
+- **Background reading & coordination**
+    - [ ] Review Albert’s thesis for methodology alignment.
+    - [ ] Monitor opportunities from the Environmental Intelligence conference (IDSAI, Exeter; contact: Hywel Williams).

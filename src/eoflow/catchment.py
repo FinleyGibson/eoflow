@@ -12,7 +12,7 @@ def delineate_catchment(
     dirmap: Tuple[int, int, int, int, int, int, int, int] = (64, 128, 1, 2, 4, 8, 16, 32),
     apply_input_mask: bool = False,
     nodata_in: Optional[float] = None,
-    nodata_out: float = 0,
+    nodata_out: Optional[float] = None,
     pit_fill: bool = True,
     pit_fill_epsilon: float = 0.0001,
     resolve_flats: bool = True,
@@ -40,7 +40,9 @@ def delineate_catchment(
         apply_input_mask: Whether to apply the DEM's nodata mask to operations.
         nodata_in: Value representing nodata in the input DEM. If None, will use
                    the raster's nodata value.
-        nodata_out: Value to use for nodata in output arrays.
+        nodata_out: Value to use for nodata in output arrays. If None, pysheds
+                    manages nodata per step automatically (recommended to avoid
+                    dtype conflicts with NumPy 2.x).
         pit_fill: Whether to fill pits in the DEM before flow analysis.
         pit_fill_epsilon: Small value to add when filling pits to ensure drainage.
         resolve_flats: Whether to resolve flat areas in the DEM.
@@ -88,14 +90,21 @@ def delineate_catchment(
             f"x: [{grid.bbox[0]}, {grid.bbox[2]}], y: [{grid.bbox[1]}, {grid.bbox[3]}]"
         )
 
+    # Build optional nodata kwargs – only include them when the caller
+    # explicitly provided a value so that pysheds can fall back to its own
+    # per-step defaults and avoid dtype conflicts (e.g. float nodata on a
+    # uint8 flow-direction array).
+    _nodata_in_kw = {} if nodata_in is None else {"nodata_in": nodata_in}
+    _nodata_out_kw = {} if nodata_out is None else {"nodata_out": nodata_out}
+
     # Step 1: Fill pits in DEM
     if pit_fill:
-        pit_filled_dem = grid.fill_pits(dem, nodata_in=nodata_in, nodata_out=nodata_out)
+        pit_filled_dem = grid.fill_pits(dem, **_nodata_in_kw, **_nodata_out_kw)
 
         # Step 2: Resolve flats
         if resolve_flats:
             inflated_dem = grid.resolve_flats(
-                pit_filled_dem, nodata_in=nodata_out, nodata_out=nodata_out, eps=pit_fill_epsilon
+                pit_filled_dem, eps=pit_fill_epsilon, **_nodata_out_kw
             )
         else:
             inflated_dem = pit_filled_dem
@@ -106,8 +115,6 @@ def delineate_catchment(
     if routing.lower() == "d8":
         fdir = grid.flowdir(
             inflated_dem,
-            nodata_in=nodata_out,
-            nodata_out=nodata_out,
             dirmap=dirmap,
             routing=routing,
         )
@@ -118,8 +125,6 @@ def delineate_catchment(
     acc = grid.accumulation(
         fdir,
         dirmap=dirmap,
-        nodata_in=nodata_out,
-        nodata_out=nodata_out,
         routing=routing,
         apply_input_mask=apply_input_mask,
     )
@@ -141,7 +146,6 @@ def delineate_catchment(
             y=y_snap,
             fdir=fdir,
             dirmap=dirmap,
-            nodata_out=nodata_out,
             routing=routing,
             xytype="coordinate",
         )
