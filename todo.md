@@ -12,17 +12,24 @@
     - [x] Generate river graph from maps
     - [ ] Add Water sample data to graph as nodes
     - [ ] Convert to Directed graph
+- [ ] River Tree
+    - [ ] Move to tree data structure
 - [ ] Modelling
+    - [ ] Script to build sample-catchment dataset.
     - [ ] Basic interpolation model
     - [ ] Directed interpolation model
     - [ ] Weighted interpolation model
     - [ ] Weighted directed interpolation model
     - [ ] Graph Neural Network
     - [ ] Graph Gaussian Process
+    - [ ] Conformal prediction | Conformal Neural Network
+        - [ ] [MAPIE](https://mapie.readthedocs.io/en/stable/) Python library for conformal prediction
+            - Practical [guide](https://algotrading101.com/learn/conformal-prediction-guide/) to MAPIE
+    - [ ] Look for modelling on tree structures
 - [ ] API
     - [x] Split tests for EA data into API amd non API
         - [x] Ensure passes all tests.
-    - [ ] Add CS samples to water samples in API.
+    - [x] Add CS samples to water samples in API.
     - [ ] Package API for Benjamin.
         - [ ] New repo
         - [ ] Transplant required code only
