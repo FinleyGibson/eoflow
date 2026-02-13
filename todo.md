@@ -75,8 +75,8 @@
 
 ## Next Steps
 
-- [ ] Get SOME EA data using script
-- [ ] Script to convert to desired format
+- [x] Get SOME EA data using script
+- [x] Script to convert to desired format
 - [ ] Prune EA data to a few examples (3)
 - [ ] Run script to get catchments
 - [ ] Check outputs
