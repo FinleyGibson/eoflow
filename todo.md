@@ -1,5 +1,7 @@
 # To Do:
 
+## Overall Plan
+
 - [ ] Water sample data
     - [ ] Citizen Scientist Data (real)
         - [ ] Load and visualise from ArcGIS API
@@ -70,3 +72,16 @@
 - **Background reading & coordination**
     - [ ] Review Albert’s thesis for methodology alignment.
     - [ ] Monitor opportunities from the Environmental Intelligence conference (IDSAI, Exeter; contact: Hywel Williams).
+
+## Next Steps
+
+- [ ] Get SOME EA data using script
+- [ ] Script to convert to desired format
+- [ ] Prune EA data to a few examples (3)
+- [ ] Run script to get catchments
+- [ ] Check outputs
+- [ ] Visualise outputs
+- [ ] Build output class
+- [ ] port methods to get EO data into class
+
+
