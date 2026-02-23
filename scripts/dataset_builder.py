@@ -22,6 +22,8 @@ Usage
         --flow-acc-threshold 1000     # pysheds snap threshold
         --lat-col   lat               # column name for latitude
         --lon-col   long              # column name for longitude
+        --log-level DEBUG             # logging verbosity
+        --log-file  logs/builder.log  # write logs to file as well
 """
 
 from __future__ import annotations
@@ -38,9 +40,56 @@ import pandas as pd
 from shapely.geometry import Point, Polygon
 
 from eoflow.catchment import delineate_catchment
-from eoflow.log_utils import get_logger
+from eoflow.log_utils import (
+    DETAILED_FORMAT,
+    disable_library_logging,
+    get_logger,
+    setup_logging,
+)
 
+# Module-level logger.  Handlers are attached later by _configure_logging().
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Logging bootstrap
+# ---------------------------------------------------------------------------
+
+_NOISY_LIBRARIES = (
+    "pysheds",
+    "rasterio",
+    "fiona",
+    "urllib3",
+    "matplotlib",
+    "PIL",
+)
+
+
+def _configure_logging(
+    level: str = "INFO",
+    log_file: Optional[Path] = None,
+) -> None:
+    """Configure the module logger via :func:`setup_logging`.
+
+    Called once from :func:`main` after CLI arguments have been parsed so that
+    ``--log-level`` and ``--log-file`` take effect.
+    """
+    global logger
+    logger = setup_logging(
+        name=__name__,
+        level=level.upper(),
+        log_file=log_file,
+        console=True,
+        colored=True,
+        format_string=DETAILED_FORMAT if level.upper() == "DEBUG" else None,
+    )
+
+    # Suppress chatty third-party loggers
+    for lib in _NOISY_LIBRARIES:
+        disable_library_logging(lib)
+        logger.debug("Suppressed noisy logger: %s", lib)
+
+    logger.debug("Logging configured  (level=%s, file=%s)", level, log_file)
+
 
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
@@ -80,8 +129,10 @@ def _save_checkpoint(gdf: gpd.GeoDataFrame, path: Path) -> None:
 def _load_checkpoint(path: Path) -> Optional[gpd.GeoDataFrame]:
     """Load a previous checkpoint if it exists, else return None."""
     if not path.exists():
+        logger.debug("No checkpoint file found at %s", path)
         return None
     try:
+        logger.debug("Attempting to load checkpoint from %s", path)
         gdf = gpd.read_file(str(path), layer=CHECKPOINT_LAYER)
         logger.info("Loaded checkpoint from %s  (%d rows)", path, len(gdf))
         # Rename the geometry column back to 'catchment'
@@ -90,6 +141,9 @@ def _load_checkpoint(path: Path) -> Optional[gpd.GeoDataFrame]:
         # Drop the helper WKT column if present
         if _CATCHMENT_WKT_COL in gdf.columns:
             gdf = gdf.drop(columns=[_CATCHMENT_WKT_COL])
+
+        if isinstance(gdf, pd.DataFrame):
+            gdf = gpd.GeoDataFrame(gdf, geometry="catchment")
         return gdf
     except Exception:
         logger.warning("Could not load checkpoint – starting fresh.\n%s", traceback.format_exc())
@@ -113,6 +167,7 @@ def _build_location_cache(
         if isinstance(geom, Polygon):
             key = (float(row[lat_col]), float(row[lon_col]))
             cache[key] = geom
+    logger.debug("Built location cache with %d entries", len(cache))
     return cache
 
 
@@ -154,6 +209,8 @@ def build_dataset(
         additional ``delineation_status`` and ``delineation_error`` columns.
     """
 
+    run_t0 = time.perf_counter()
+
     # ------------------------------------------------------------------
     # 1. Load the input CSV
     # ------------------------------------------------------------------
@@ -161,6 +218,7 @@ def build_dataset(
     df = pd.read_csv(csv_path)
     n_total = len(df)
     logger.info("Loaded %d rows with %d columns", n_total, len(df.columns))
+    logger.debug("CSV columns: %s", list(df.columns))
 
     if lat_col not in df.columns or lon_col not in df.columns:
         raise ValueError(
@@ -172,6 +230,8 @@ def build_dataset(
     n_dropped = int((~valid_mask).sum())
     if n_dropped:
         logger.warning("Dropping %d rows with missing coordinates", n_dropped)
+    else:
+        logger.debug("All %d rows have valid coordinates", n_total)
     df = df[valid_mask].copy()
 
     # ------------------------------------------------------------------
@@ -192,6 +252,8 @@ def build_dataset(
                 len(checkpoint),
                 len(df),
             )
+        else:
+            logger.info("No usable checkpoint found – starting from scratch")
         # Create a fresh GeoDataFrame from the CSV rows.
         gdf = gpd.GeoDataFrame(df, geometry=gpd.GeoSeries([None] * len(df)), crs="EPSG:4326")
         gdf = gdf.rename_geometry("catchment")
@@ -232,6 +294,9 @@ def build_dataset(
         len(locations_to_process),
     )
 
+    if not locations_to_process:
+        logger.info("Nothing to delineate – all locations are already cached")
+
     for loc_idx, (lat, lon) in enumerate(locations_to_process, start=1):
         point = Point(lon, lat)  # shapely Point is (x=lon, y=lat)
         loc_key = (lat, lon)
@@ -243,6 +308,7 @@ def build_dataset(
             lat,
             lon,
         )
+        logger.debug("  Point WKT: %s", point.wkt)
         t0 = time.perf_counter()
         try:
             polygon = delineate_catchment(
@@ -256,15 +322,19 @@ def build_dataset(
             status = "ok"
             error_msg = ""
             logger.info("  ✓ Delineated in %.1fs  (area=%.6f)", elapsed, polygon.area)
+            logger.debug("  Polygon bounds: %s", polygon.bounds)
         except Exception as exc:
             elapsed = time.perf_counter() - t0
             status = "error"
             error_msg = str(exc)
             n_fail += 1
             logger.warning("  ✗ Failed in %.1fs: %s", elapsed, exc)
+            logger.debug("  Traceback:\n%s", traceback.format_exc())
 
         # Apply result to every row sharing this (lat, lon)
         mask = (gdf[lat_col] == lat) & (gdf[lon_col] == lon)
+        n_matching = int(mask.sum())
+        logger.debug("  Applying result to %d row(s) with matching coordinates", n_matching)
         if status == "ok":
             gdf.loc[mask, "catchment"] = cache[loc_key]
         gdf.loc[mask, "delineation_status"] = status
@@ -281,13 +351,15 @@ def build_dataset(
     n_ok = int((gdf["delineation_status"] == "ok").sum())
     n_err = int((gdf["delineation_status"] == "error").sum())
     n_empty = int((gdf["delineation_status"] == "").sum())
+    total_elapsed = time.perf_counter() - run_t0
 
     logger.info("=" * 60)
-    logger.info("Done.  %d rows total", len(gdf))
+    logger.info("Done.  %d rows total  (elapsed %.1fs)", len(gdf), total_elapsed)
     logger.info("  OK:      %d rows  (%d unique locations)", n_ok, len(cache))
     logger.info("  Error:   %d rows", n_err)
     logger.info("  Skipped: %d rows (no coordinates / unprocessed)", n_empty)
     logger.info("  New delineations this run: %d", new_delineations)
+    logger.info("  Failed delineations this run: %d", n_fail)
     logger.info("=" * 60)
 
     _save_checkpoint(gdf, output_path)
@@ -347,11 +419,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1000,
         help="Flow-accumulation threshold for pour-point snapping.",
     )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity level.",
+    )
+    p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional path to a log file. Logs are always sent to the "
+        "console; this adds file output as well.",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+
+    # Configure logging as early as possible so every subsequent message
+    # is properly formatted and routed.
+    _configure_logging(level=args.log_level, log_file=args.log_file)
+
+    logger.info("dataset_builder starting")
+    logger.debug(
+        "Parsed arguments: csv=%s, dem=%s, out=%s, lat_col=%s, lon_col=%s, "
+        "checkpoint_every=%d, flow_acc_threshold=%d, log_level=%s, log_file=%s",
+        args.csv,
+        args.dem,
+        args.out,
+        args.lat_col,
+        args.lon_col,
+        args.checkpoint_every,
+        args.flow_acc_threshold,
+        args.log_level,
+        args.log_file,
+    )
 
     if not args.csv.exists():
         logger.error("CSV file not found: %s", args.csv)
@@ -359,6 +463,10 @@ def main(argv: list[str] | None = None) -> None:
     if not args.dem.exists():
         logger.error("DEM file not found: %s", args.dem)
         sys.exit(1)
+
+    logger.info("CSV path  : %s", args.csv.resolve())
+    logger.info("DEM path  : %s", args.dem.resolve())
+    logger.info("Output    : %s", args.out.resolve())
 
     build_dataset(
         csv_path=args.csv,
@@ -369,6 +477,8 @@ def main(argv: list[str] | None = None) -> None:
         checkpoint_every=args.checkpoint_every,
         flow_acc_threshold=args.flow_acc_threshold,
     )
+
+    logger.info("dataset_builder finished")
 
 
 if __name__ == "__main__":

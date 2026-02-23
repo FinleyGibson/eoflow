@@ -5,6 +5,10 @@ import numpy as np
 from pysheds.grid import Grid
 from shapely.geometry import Point, Polygon, shape
 
+from eoflow.log_utils import get_logger
+
+logger = get_logger(__name__)
+
 
 def delineate_catchment(
     point: Point,
@@ -97,6 +101,22 @@ def delineate_catchment(
     _nodata_in_kw = {} if nodata_in is None else {"nodata_in": nodata_in}
     _nodata_out_kw = {} if nodata_out is None else {"nodata_out": nodata_out}
 
+    # Detect when the DEM's nodata is a float that cannot be safely cast
+    # into integer arrays.  pysheds propagates the ViewFinder nodata to
+    # every output Raster and checks ``np.can_cast(nodata, dtype, 'safe')``.
+    # Under NumPy 2.x (NEP 50) float → int is *never* a safe cast, so
+    # steps that produce integer arrays (flowdir, accumulation, catchment)
+    # need an explicit integer nodata_out.
+    _dem_nodata = getattr(dem, "nodata", None)
+    if _dem_nodata is not None and np.issubdtype(np.array(_dem_nodata).dtype, np.floating):
+        _int_nodata_out = {"nodata_out": np.int64(0)}
+        logger.debug(
+            "DEM nodata is float (%s) – using nodata_out=0 for integer steps",
+            _dem_nodata,
+        )
+    else:
+        _int_nodata_out = {}
+
     # Step 1: Fill pits in DEM
     if pit_fill:
         pit_filled_dem = grid.fill_pits(dem, **_nodata_in_kw, **_nodata_out_kw)
@@ -117,6 +137,7 @@ def delineate_catchment(
             inflated_dem,
             dirmap=dirmap,
             routing=routing,
+            **_int_nodata_out,
         )
     else:
         raise ValueError(f"Unsupported routing method: {routing}. Use 'd8' or 'dinf'.")
@@ -127,6 +148,7 @@ def delineate_catchment(
         dirmap=dirmap,
         routing=routing,
         apply_input_mask=apply_input_mask,
+        **_int_nodata_out,
     )
 
     # Step 5: Snap pour point to nearest high-accumulation cell
@@ -135,8 +157,8 @@ def delineate_catchment(
         x_snap, y_snap = grid.snap_to_mask(acc > flow_acc_threshold, (x, y), return_dist=False)
     except Exception as e:
         # If snapping fails, try using the original point
-        print(f"Warning: Could not snap point to stream network: {e}")
-        print(f"Using original point coordinates: ({x}, {y})")
+        logger.warning("Could not snap point to stream network: %s", e)
+        logger.warning("Using original point coordinates: (%.6f, %.6f)", x, y)
         x_snap, y_snap = x, y
 
     # Step 6: Delineate the catchment
@@ -148,6 +170,7 @@ def delineate_catchment(
             dirmap=dirmap,
             routing=routing,
             xytype="coordinate",
+            **_int_nodata_out,
         )
     except Exception as e:
         raise ValueError(f"Failed to delineate catchment: {e}")
