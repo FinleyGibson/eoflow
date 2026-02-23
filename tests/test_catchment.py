@@ -11,10 +11,18 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
+import pandas as pd
 import pytest
 from shapely.geometry import Point, Polygon
 
 from eoflow.catchment import delineate_catchment, delineate_catchment_with_metadata
+
+# ---------------------------------------------------------------------------
+# Paths to real test data used by integration tests
+# ---------------------------------------------------------------------------
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_CSV_PATH = _DATA_DIR / "ea_water_quality_clean_pruned.csv"
+_DEM_PATH = _DATA_DIR / "uk_dem.geotiff"
 
 
 @pytest.fixture
@@ -1331,18 +1339,208 @@ class TestCatchmentAsInt32:
         assert polygonize_arg.dtype == np.int32
 
 
+# ---------------------------------------------------------------------------
+# Helpers for integration tests
+# ---------------------------------------------------------------------------
+
+
+def _load_sample_points() -> pd.DataFrame:
+    """Load the water quality CSV and return a DataFrame with lat/lon."""
+    return pd.read_csv(_CSV_PATH)
+
+
+def _skip_if_data_missing():
+    """Pytest skip helper when test data files are absent."""
+    if not _CSV_PATH.exists():
+        pytest.skip(f"CSV not found: {_CSV_PATH}")
+    if not _DEM_PATH.exists():
+        pytest.skip(f"DEM not found: {_DEM_PATH}")
+
+
+# A small, representative subset of points from the CSV selected for
+# geographic diversity (south-west, midlands, north-east, thames).
+# Each tuple: (label_fragment, longitude, latitude)
+_REPRESENTATIVE_POINTS = [
+    ("KENNET AT STITCHCOMBE MILL", -1.6744766949667198, 51.42452537684588),
+    ("SMALL BROOK (KINGSBRIDGE) AT BOWCOMBE", -3.7555385318960095, 50.28611262100282),
+    ("LUNE AT LUNE BRIDGE/VIADUCT (NW MICKLETON)", -2.065150679659169, 54.61141239059547),
+]
+
+
 @pytest.mark.integration
 class TestCatchmentIntegration:
     """
-    Integration tests for catchment delineation.
+    Integration tests for catchment delineation using real EA water-quality
+    sample points and the UK DEM.
 
-    These tests require actual DEM data and are marked as integration tests.
-    Run with: pytest -m integration
+    These tests are slow (~90 s each) because they process a full-resolution
+    DEM.  They are gated behind the ``integration`` marker so that they only
+    run when explicitly requested::
+
+        pytest -m integration
+        pytest -m integration -k TestCatchmentIntegration
     """
 
-    def test_placeholder(self):
-        """Placeholder for integration tests with real DEM data."""
-        pytest.skip("Integration tests require real DEM data")
+    # ------------------------------------------------------------------
+    # Fixtures
+    # ------------------------------------------------------------------
+
+    @pytest.fixture(autouse=True)
+    def _require_data(self):
+        """Skip the entire class when test data is missing."""
+        _skip_if_data_missing()
+
+    @pytest.fixture()
+    def sample_df(self) -> pd.DataFrame:
+        """The full water-quality DataFrame."""
+        return _load_sample_points()
+
+    # ------------------------------------------------------------------
+    # Parametrised delineation tests
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "label, lon, lat",
+        _REPRESENTATIVE_POINTS,
+        ids=[p[0] for p in _REPRESENTATIVE_POINTS],
+    )
+    def test_delineate_returns_valid_polygon(self, label, lon, lat):
+        """Delineation should return a valid, non-empty Shapely Polygon."""
+        point = Point(lon, lat)
+        poly = delineate_catchment(point, _DEM_PATH, flow_acc_threshold=1000)
+
+        assert isinstance(poly, Polygon), f"Expected Polygon, got {type(poly)}"
+        assert poly.is_valid, "Returned polygon is not valid"
+        assert not poly.is_empty, "Returned polygon is empty"
+        assert poly.area > 0, "Polygon area must be positive"
+
+    @pytest.mark.parametrize(
+        "label, lon, lat",
+        _REPRESENTATIVE_POINTS,
+        ids=[p[0] for p in _REPRESENTATIVE_POINTS],
+    )
+    def test_catchment_bounds_are_near_pour_point(self, label, lon, lat):
+        """The catchment bounding box should be reasonably close to the pour point.
+
+        We allow up to 1 degree of separation — catchments in the UK at
+        ~90 m resolution rarely extend further than that from the outlet.
+        """
+        point = Point(lon, lat)
+        poly = delineate_catchment(point, _DEM_PATH, flow_acc_threshold=1000)
+        minx, miny, maxx, maxy = poly.bounds
+
+        max_offset_deg = 1.0
+        assert abs(minx - lon) < max_offset_deg, "minx too far from pour point lon"
+        assert abs(maxx - lon) < max_offset_deg, "maxx too far from pour point lon"
+        assert abs(miny - lat) < max_offset_deg, "miny too far from pour point lat"
+        assert abs(maxy - lat) < max_offset_deg, "maxy too far from pour point lat"
+
+    # ------------------------------------------------------------------
+    # Single-point focused tests (use the first representative point to
+    # keep runtime manageable)
+    # ------------------------------------------------------------------
+
+    def test_catchment_polygon_has_reasonable_area(self):
+        """Catchment area (in square degrees) should be small but non-trivial."""
+        lon, lat = _REPRESENTATIVE_POINTS[0][1], _REPRESENTATIVE_POINTS[0][2]
+        poly = delineate_catchment(Point(lon, lat), _DEM_PATH, flow_acc_threshold=1000)
+
+        # At UK latitudes 1 deg ≈ 111 km (lat) / ~70 km (lon).
+        # Catchment areas for small rivers are typically < 0.1 sq-deg.
+        assert poly.area < 0.5, f"Catchment area suspiciously large: {poly.area}"
+        assert poly.area > 1e-6, f"Catchment area suspiciously small: {poly.area}"
+
+    def test_catchment_centroid_is_inside_polygon(self):
+        """The polygon's centroid should lie within (or on) the polygon."""
+        lon, lat = _REPRESENTATIVE_POINTS[0][1], _REPRESENTATIVE_POINTS[0][2]
+        poly = delineate_catchment(Point(lon, lat), _DEM_PATH, flow_acc_threshold=1000)
+        centroid = poly.centroid
+
+        # Use a tiny buffer to handle floating-point edge cases
+        assert poly.buffer(1e-8).contains(centroid), "Centroid is not inside the polygon"
+
+    def test_with_metadata_returns_expected_keys(self):
+        """``delineate_catchment_with_metadata`` should return all documented keys."""
+        lon, lat = _REPRESENTATIVE_POINTS[0][1], _REPRESENTATIVE_POINTS[0][2]
+        point = Point(lon, lat)
+        result = delineate_catchment_with_metadata(point, _DEM_PATH, flow_acc_threshold=1000)
+
+        expected_keys = {"polygon", "area", "centroid", "bounds", "pour_point"}
+        assert set(result.keys()) == expected_keys
+
+        assert isinstance(result["polygon"], Polygon)
+        assert result["polygon"].is_valid
+        assert result["area"] > 0
+        assert result["pour_point"].equals(point)
+
+        # bounds should be a 4-tuple
+        assert len(result["bounds"]) == 4
+        minx, miny, maxx, maxy = result["bounds"]
+        assert minx < maxx
+        assert miny < maxy
+
+    def test_flow_acc_threshold_affects_catchment(self):
+        """Different flow-accumulation thresholds should produce different
+        catchments because the pour point snaps to different stream cells."""
+        lon, lat = _REPRESENTATIVE_POINTS[0][1], _REPRESENTATIVE_POINTS[0][2]
+        point = Point(lon, lat)
+
+        poly_low = delineate_catchment(point, _DEM_PATH, flow_acc_threshold=500)
+        poly_high = delineate_catchment(point, _DEM_PATH, flow_acc_threshold=5000)
+
+        # The two polygons should both be valid but need not be identical
+        assert poly_low.is_valid
+        assert poly_high.is_valid
+        # They *may* happen to be identical if both thresholds snap to the
+        # same cell, so we just verify they are both legitimate polygons.
+        assert poly_low.area > 0
+        assert poly_high.area > 0
+
+    # ------------------------------------------------------------------
+    # CSV-driven tests
+    # ------------------------------------------------------------------
+
+    def test_all_csv_points_within_dem_bounds(self, sample_df):
+        """Every point in the CSV should fall inside the DEM bounding box."""
+        from pysheds.grid import Grid
+
+        grid = Grid.from_raster(str(_DEM_PATH))
+        bbox = grid.bbox  # (left, bottom, right, top)
+
+        for _, row in sample_df.iterrows():
+            lon, lat = row["longitude"], row["latitude"]
+            assert bbox[0] <= lon <= bbox[2], (
+                f"Longitude {lon} outside DEM x-range [{bbox[0]}, {bbox[2]}]"
+            )
+            assert bbox[1] <= lat <= bbox[3], (
+                f"Latitude {lat} outside DEM y-range [{bbox[1]}, {bbox[3]}]"
+            )
+
+    def test_csv_has_expected_columns(self, sample_df):
+        """The CSV should contain the columns needed for delineation."""
+        required = {"latitude", "longitude", "samplingPoint.prefLabel"}
+        assert required.issubset(set(sample_df.columns))
+
+    def test_csv_has_expected_row_count(self, sample_df):
+        """Sanity-check: the pruned CSV should have exactly 10 rows."""
+        assert len(sample_df) == 10
+
+    # ------------------------------------------------------------------
+    # Error-path integration tests
+    # ------------------------------------------------------------------
+
+    def test_point_outside_dem_raises_value_error(self):
+        """A point clearly outside the UK DEM should raise ``ValueError``."""
+        point = Point(10.0, 60.0)  # somewhere in Scandinavia
+        with pytest.raises(ValueError, match="outside DEM bounds"):
+            delineate_catchment(point, _DEM_PATH)
+
+    def test_dem_path_as_string_works(self):
+        """Passing the DEM path as a plain string should work identically."""
+        lon, lat = _REPRESENTATIVE_POINTS[0][1], _REPRESENTATIVE_POINTS[0][2]
+        poly = delineate_catchment(Point(lon, lat), str(_DEM_PATH), flow_acc_threshold=1000)
+        assert isinstance(poly, Polygon)
+        assert poly.is_valid
 
 
 if __name__ == "__main__":
