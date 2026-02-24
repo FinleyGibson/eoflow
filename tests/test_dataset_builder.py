@@ -4,14 +4,14 @@ Unit tests for the dataset_builder script.
 These tests exercise the CLI argument parser, the core ``build_dataset``
 function, checkpoint save / load / resume, location-cache construction,
 the ``main()`` entry-point, and various edge-cases – all without requiring
-real DEM data.  ``delineate_catchment`` is mocked throughout.
+real DEM data.  ``_delineate_catchment_core`` is mocked throughout.
 
 The tests mirror a real invocation such as::
 
     uv run scripts/dataset_builder.py \
-        --csv ./data/ea_water_quality_clean_pruned.csv \
-        --out data/ea_water_quality_dataset.gpkg \
-        --dem data/uk_dem.geotiff \
+        --csv ./data/devon_water_quality.csv \
+        --out data/devon_water_quality_dataset.gpkg \
+        --dem data/devon_dem.tif \
         --lat-col latitude \
         --lon-col longitude
 """
@@ -25,7 +25,7 @@ from unittest.mock import patch
 import geopandas as gpd
 import pandas as pd
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from scripts.dataset_builder import (
     CHECKPOINT_LAYER,
@@ -42,8 +42,13 @@ from scripts.dataset_builder import (
 # ---------------------------------------------------------------------------
 
 
-def _sample_polygon(lon: float = -3.5, lat: float = 50.7, size: float = 0.1) -> Polygon:
-    """Return a small square polygon centred on (*lon*, *lat*)."""
+def _sample_result(lon: float = -3.53, lat: float = 50.72, size: float = 0.1):
+    """Return a (Polygon, Point) tuple matching ``_delineate_catchment_core``."""
+    return (_sample_polygon(lon, lat, size), Point(lon, lat))
+
+
+def _sample_polygon(lon: float = -3.53, lat: float = 50.72, size: float = 0.1) -> Polygon:
+    """Return a small square polygon centred on (*lon*, *lat*) in Devon."""
     half = size / 2
     return Polygon(
         [
@@ -65,11 +70,20 @@ def _write_csv(
     include_nan_row: bool = False,
     extra_cols: dict | None = None,
 ) -> pd.DataFrame:
-    """Write a minimal CSV with coordinate columns and return the DataFrame."""
+    """Write a minimal Devon-style CSV with coordinate columns and return the DataFrame.
+
+    Coordinates are within Devon (lat ~50.7, lon ~-3.5).
+    """
+    # Devon sampling-point locations (lat/lon in WGS84)
     data = {
-        lat_col: [50.7 + i * 0.01 for i in range(n_rows)],
-        lon_col: [-3.5 + i * 0.01 for i in range(n_rows)],
+        lat_col: [50.72 + i * 0.01 for i in range(n_rows)],
+        lon_col: [-3.53 + i * 0.01 for i in range(n_rows)],
         "sample_id": list(range(n_rows)),
+        "samplingPoint.notation": [f"SW-7{i:07d}" for i in range(n_rows)],
+        "samplingPoint.easting": [292546 + i * 100 for i in range(n_rows)],
+        "samplingPoint.northing": [91506 + i * 100 for i in range(n_rows)],
+        "result": [5.0 + i * 1.5 for i in range(n_rows)],
+        "determinand.prefLabel": ["Turbidity"] * n_rows,
     }
     if extra_cols:
         data.update(extra_cols)
@@ -116,8 +130,8 @@ def csv_path_with_nan(tmp_dir: Path) -> Path:
 
 @pytest.fixture()
 def dem_path(tmp_dir: Path) -> Path:
-    """Create a dummy DEM file (content doesn't matter – it's mocked)."""
-    p = tmp_dir / "uk_dem.geotiff"
+    """Create a dummy Devon DEM file (content doesn't matter – it's mocked)."""
+    p = tmp_dir / "devon_dem.tif"
     p.touch()
     return p
 
@@ -125,7 +139,7 @@ def dem_path(tmp_dir: Path) -> Path:
 @pytest.fixture()
 def output_path(tmp_dir: Path) -> Path:
     """Return a path for the output GeoPackage (does not exist yet)."""
-    return tmp_dir / "output" / "ea_water_quality_dataset.gpkg"
+    return tmp_dir / "output" / "devon_water_quality_dataset.gpkg"
 
 
 @pytest.fixture()
@@ -161,8 +175,8 @@ class TestParseArgs:
     def test_required_args_parsed(self, cli_argv: List[str]) -> None:
         args = parse_args(cli_argv)
         assert args.csv.name == "samples.csv"
-        assert args.dem.name == "uk_dem.geotiff"
-        assert args.out.name == "ea_water_quality_dataset.gpkg"
+        assert args.dem.name == "devon_dem.tif"
+        assert args.out.name == "devon_water_quality_dataset.gpkg"
 
     def test_lat_lon_columns(self, cli_argv: List[str]) -> None:
         args = parse_args(cli_argv)
@@ -231,10 +245,10 @@ class TestParseArgs:
 class TestBuildDataset:
     """Test the core ``build_dataset`` function with mocked delineation."""
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_basic_run(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """All rows succeed – every row should have status 'ok'."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -249,9 +263,9 @@ class TestBuildDataset:
         assert (gdf["delineation_status"] == "ok").all()
         assert (gdf["delineation_error"] == "").all()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_output_gpkg_created(self, mock_delineate, csv_path, dem_path, output_path) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv_path,
@@ -263,11 +277,11 @@ class TestBuildDataset:
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_catchment_geometry_is_polygon(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -280,7 +294,7 @@ class TestBuildDataset:
         for geom in gdf["catchment"]:
             assert isinstance(geom, Polygon)
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_delineation_called_per_unique_location(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -288,14 +302,14 @@ class TestBuildDataset:
         csv = tmp_dir / "dup.csv"
         df = pd.DataFrame(
             {
-                "latitude": [50.7, 50.7, 50.8],
-                "longitude": [-3.5, -3.5, -3.6],
+                "latitude": [50.72, 50.72, 50.80],
+                "longitude": [-3.53, -3.53, -3.60],
                 "sample_id": [1, 2, 3],
             }
         )
         df.to_csv(csv, index=False)
 
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv,
@@ -308,22 +322,22 @@ class TestBuildDataset:
         # 2 unique locations → 2 calls
         assert mock_delineate.call_count == 2
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_duplicate_locations_share_polygon(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
         csv = tmp_dir / "dup.csv"
         df = pd.DataFrame(
             {
-                "latitude": [50.7, 50.7],
-                "longitude": [-3.5, -3.5],
+                "latitude": [50.72, 50.72],
+                "longitude": [-3.53, -3.53],
                 "sample_id": [1, 2],
             }
         )
         df.to_csv(csv, index=False)
 
-        poly = _sample_polygon(-3.5, 50.7)
-        mock_delineate.return_value = poly
+        poly = _sample_polygon(-3.53, 50.72)
+        mock_delineate.return_value = (poly, Point(-3.53, 50.72))
 
         gdf = build_dataset(
             csv_path=csv,
@@ -335,7 +349,7 @@ class TestBuildDataset:
 
         assert gdf.iloc[0]["catchment"].equals(gdf.iloc[1]["catchment"])
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_delineation_failure_recorded(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -352,7 +366,7 @@ class TestBuildDataset:
         assert (gdf["delineation_status"] == "error").all()
         assert (gdf["delineation_error"] == "DEM out of bounds").all()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_partial_failure(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """Some locations succeed, others fail."""
         call_count = {"n": 0}
@@ -360,7 +374,7 @@ class TestBuildDataset:
         def _side_effect(point, **kw):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                return _sample_polygon(point.x, point.y)
+                return _sample_result(point.x, point.y)
             raise RuntimeError("boom")
 
         mock_delineate.side_effect = _side_effect
@@ -378,7 +392,7 @@ class TestBuildDataset:
         assert n_ok == 2
         assert n_err == 2
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_missing_column_raises(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         csv = tmp_dir / "bad.csv"
         pd.DataFrame({"x": [1], "y": [2]}).to_csv(csv, index=False)
@@ -392,11 +406,11 @@ class TestBuildDataset:
                 lon_col="longitude",
             )
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_nan_coordinates_dropped(
         self, mock_delineate, csv_path_with_nan, dem_path, output_path
     ) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path_with_nan,
@@ -410,11 +424,11 @@ class TestBuildDataset:
         assert len(gdf) == 4
         assert (gdf["delineation_status"] == "ok").all()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_flow_acc_threshold_forwarded(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv_path,
@@ -428,15 +442,15 @@ class TestBuildDataset:
         for call in mock_delineate.call_args_list:
             assert call.kwargs["flow_acc_threshold"] == 2500
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_point_constructed_as_lon_lat(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
         """Shapely Points should be (x=lon, y=lat)."""
         csv = tmp_dir / "one.csv"
-        pd.DataFrame({"latitude": [50.7], "longitude": [-3.5]}).to_csv(csv, index=False)
+        pd.DataFrame({"latitude": [50.72], "longitude": [-3.53]}).to_csv(csv, index=False)
 
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv,
@@ -447,14 +461,14 @@ class TestBuildDataset:
         )
 
         called_point = mock_delineate.call_args_list[0].kwargs["point"]
-        assert called_point.x == pytest.approx(-3.5)
-        assert called_point.y == pytest.approx(50.7)
+        assert called_point.x == pytest.approx(-3.53)
+        assert called_point.y == pytest.approx(50.72)
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_result_has_expected_columns(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -471,13 +485,13 @@ class TestBuildDataset:
         assert "longitude" in gdf.columns
         assert "sample_id" in gdf.columns
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_original_csv_columns_preserved(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
         csv = tmp_dir / "extra.csv"
         _write_csv(csv, extra_cols={"colour": ["red", "blue", "green", "yellow"]})
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv,
@@ -498,9 +512,9 @@ class TestBuildDataset:
 class TestCheckpointing:
     """Save / load / resume checkpoint round-trips."""
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_checkpoint_file_written(self, mock_delineate, csv_path, dem_path, output_path) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv_path,
@@ -512,10 +526,10 @@ class TestCheckpointing:
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_checkpoint_round_trip(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """Write → reload checkpoint; row count and status must survive."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -529,12 +543,12 @@ class TestCheckpointing:
         assert loaded is not None
         assert len(loaded) == len(gdf)
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_resume_skips_already_delineated(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
         """Running twice must not re-delineate locations from the first run."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         # First run – delineates all 4 unique locations
         build_dataset(
@@ -559,12 +573,12 @@ class TestCheckpointing:
         )
         assert mock_delineate.call_count == 0
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_periodic_checkpoint(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         """With checkpoint_every=2 and 4 locations, at least one mid-run save."""
         csv = tmp_dir / "big.csv"
         _write_csv(csv, n_rows=4)
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         build_dataset(
             csv_path=csv,
@@ -588,7 +602,7 @@ class TestCheckpointing:
         result = _load_checkpoint(bad_file)
         assert result is None
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_checkpoint_with_mismatched_length_reuses_cache(
         self, mock_delineate, tmp_dir, dem_path
     ) -> None:
@@ -598,7 +612,7 @@ class TestCheckpointing:
         # Build first with 2 rows
         csv_small = tmp_dir / "small.csv"
         _write_csv(csv_small, n_rows=2)
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
         build_dataset(
             csv_path=csv_small,
             dem_path=dem_path,
@@ -612,7 +626,7 @@ class TestCheckpointing:
         # Now rebuild with 4 rows (first 2 coords are the same)
         csv_big = tmp_dir / "big.csv"
         _write_csv(csv_big, n_rows=4)
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
         gdf = build_dataset(
             csv_path=csv_big,
             dem_path=dem_path,
@@ -675,11 +689,11 @@ class TestBuildLocationCache:
     """Tests for ``_build_location_cache``."""
 
     def test_cache_from_processed_rows(self) -> None:
-        poly = _sample_polygon(-3.5, 50.7)
+        poly = _sample_polygon(-3.53, 50.72)
         gdf = gpd.GeoDataFrame(
             {
-                "latitude": [50.7, 50.8],
-                "longitude": [-3.5, -3.6],
+                "latitude": [50.72, 50.80],
+                "longitude": [-3.53, -3.60],
                 "catchment": [poly, None],
             },
             geometry="catchment",
@@ -687,8 +701,8 @@ class TestBuildLocationCache:
         )
 
         cache = _build_location_cache(gdf, "latitude", "longitude")
-        assert (50.7, -3.5) in cache
-        assert (50.8, -3.6) not in cache
+        assert (50.72, -3.53) in cache
+        assert (50.80, -3.60) not in cache
 
     def test_empty_gdf_gives_empty_cache(self) -> None:
         gdf = gpd.GeoDataFrame(
@@ -707,8 +721,8 @@ class TestBuildLocationCache:
         poly = _sample_polygon()
         gdf = gpd.GeoDataFrame(
             {
-                "latitude": [50.7, 50.7],
-                "longitude": [-3.5, -3.5],
+                "latitude": [50.72, 50.72],
+                "longitude": [-3.53, -3.53],
                 "catchment": [poly, poly],
             },
             geometry="catchment",
@@ -717,7 +731,7 @@ class TestBuildLocationCache:
 
         cache = _build_location_cache(gdf, "latitude", "longitude")
         assert len(cache) == 1
-        assert (50.7, -3.5) in cache
+        assert (50.72, -3.53) in cache
 
 
 # ---------------------------------------------------------------------------
@@ -728,25 +742,25 @@ class TestBuildLocationCache:
 class TestMainCLI:
     """Test the ``main()`` entry-point that wires up CLI → build_dataset."""
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_main_runs_end_to_end(self, mock_delineate, cli_argv, output_path) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv)
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_main_with_log_level(self, mock_delineate, cli_argv) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--log-level", "DEBUG"])
         # No exception means logging configured correctly at DEBUG
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_main_with_log_file(self, mock_delineate, cli_argv, tmp_dir) -> None:
         log_file = tmp_dir / "run.log"
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--log-file", str(log_file)])
         assert log_file.exists()
@@ -785,16 +799,16 @@ class TestMainCLI:
         with pytest.raises(SystemExit):
             main(argv)
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_main_custom_checkpoint_every(self, mock_delineate, cli_argv) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--checkpoint-every", "2"])
         # Should not raise
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_main_custom_flow_acc(self, mock_delineate, cli_argv) -> None:
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--flow-acc-threshold", "500"])
 
@@ -810,11 +824,11 @@ class TestMainCLI:
 class TestEdgeCases:
     """Boundary conditions and unusual inputs."""
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_single_row_csv(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         csv = tmp_dir / "one.csv"
         _write_csv(csv, n_rows=1)
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv,
@@ -836,7 +850,7 @@ class TestEdgeCases:
         raises=ValueError,
         strict=True,
     )
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_all_rows_nan_produces_empty_result(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -856,12 +870,12 @@ class TestEdgeCases:
         assert len(gdf) == 0
         mock_delineate.assert_not_called()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_large_checkpoint_interval(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
         """checkpoint_every > n_rows → only the final save triggers."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -875,12 +889,12 @@ class TestEdgeCases:
         assert len(gdf) == 4
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_dem_path_coerced_to_path(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
         """build_dataset wraps dem_path in Path(); passing a string should work."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,
@@ -892,7 +906,7 @@ class TestEdgeCases:
 
         assert len(gdf) == 4
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_every_delineation_raises(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -911,10 +925,10 @@ class TestEdgeCases:
         assert (gdf["delineation_status"] == "error").all()
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder.delineate_catchment")
+    @patch("scripts.dataset_builder._delineate_catchment_core")
     def test_checkpoint_every_one(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """checkpoint_every=1 saves after every delineation."""
-        mock_delineate.side_effect = lambda point, **kw: _sample_polygon(point.x, point.y)
+        mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         gdf = build_dataset(
             csv_path=csv_path,

@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 from pyproj import Transformer
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Lazily-initialised transformer: British National Grid → WGS 84
 _BNG_TO_WGS84: Transformer | None = None

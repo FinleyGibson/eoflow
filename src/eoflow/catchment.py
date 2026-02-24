@@ -10,7 +10,7 @@ from eoflow.log_utils import get_logger
 logger = get_logger(__name__)
 
 
-def delineate_catchment(
+def _delineate_catchment_core(
     point: Point,
     dem_path: Union[str, Path],
     dirmap: Tuple[int, int, int, int, int, int, int, int] = (64, 128, 1, 2, 4, 8, 16, 32),
@@ -22,55 +22,21 @@ def delineate_catchment(
     resolve_flats: bool = True,
     routing: str = "d8",
     flow_acc_threshold: int = 1000,
-) -> Polygon:
+) -> Tuple[Polygon, Point]:
     """
-    Delineate a catchment area for a given point using a Digital Elevation Model (DEM).
+    Core catchment delineation returning both polygon and snapped pour point.
 
-    This function uses the pysheds library to perform watershed delineation based on
-    terrain analysis. The workflow includes:
-    1. Loading the DEM raster
-    2. Filling pits and resolving flats
-    3. Computing flow direction
-    4. Computing flow accumulation
-    5. Snapping the pour point to the nearest high-accumulation cell
-    6. Delineating the catchment
+    This is the internal workhorse used by :func:`delineate_catchment` and
+    :func:`delineate_catchment_with_metadata`.  It returns a tuple of
+    ``(catchment_polygon, snapped_pour_point)`` so callers can see where
+    the pour point was snapped to on the stream network.
 
-    Args:
-        point: A Shapely Point representing the pour point (outlet) in the catchment.
-               Should be in the same coordinate system as the DEM.
-        dem_path: Path to the Digital Elevation Model raster file (e.g., GeoTIFF).
-        dirmap: Direction mapping for flow direction (default is for D8 routing).
-                Format: (N, NE, E, SE, S, SW, W, NW)
-        apply_input_mask: Whether to apply the DEM's nodata mask to operations.
-        nodata_in: Value representing nodata in the input DEM. If None, will use
-                   the raster's nodata value.
-        nodata_out: Value to use for nodata in output arrays. If None, pysheds
-                    manages nodata per step automatically (recommended to avoid
-                    dtype conflicts with NumPy 2.x).
-        pit_fill: Whether to fill pits in the DEM before flow analysis.
-        pit_fill_epsilon: Small value to add when filling pits to ensure drainage.
-        resolve_flats: Whether to resolve flat areas in the DEM.
-        routing: Flow routing algorithm ('d8' or 'dinf'). Default is 'd8'.
-        flow_acc_threshold: Threshold for snapping pour point to stream network.
-                           Higher values = snap to larger streams.
+    See :func:`delineate_catchment` for full parameter documentation.
 
     Returns:
-        A Shapely Polygon representing the delineated catchment boundary.
-
-    Raises:
-        FileNotFoundError: If the DEM file doesn't exist.
-        ValueError: If the point is outside the DEM extent or if catchment
-                    delineation fails.
-
-    Example:
-        >>> from shapely.geometry import Point
-        >>> point = Point(-3.5, 50.7)  # Longitude, Latitude
-        >>> catchment = delineate_catchment(
-        ...     point=point,
-        ...     dem_path="path/to/dem.tif",
-        ...     flow_acc_threshold=1000
-        ... )
-        >>> print(f"Catchment area: {catchment.area} square degrees")
+        A tuple of (Polygon, Point) where:
+            - Polygon is the delineated catchment boundary
+            - Point is the snapped pour point on the stream network
     """
     # Validate inputs
     dem_path = Path(dem_path)
@@ -155,6 +121,15 @@ def delineate_catchment(
     # This ensures the pour point is on a stream rather than a hillslope
     try:
         x_snap, y_snap = grid.snap_to_mask(acc > flow_acc_threshold, (x, y), return_dist=False)
+        snap_dist = ((x_snap - x) ** 2 + (y_snap - y) ** 2) ** 0.5
+        logger.info(
+            "  Pour point snapped: (%.6f, %.6f) → (%.6f, %.6f)  offset=%.6f°",
+            x,
+            y,
+            x_snap,
+            y_snap,
+            snap_dist,
+        )
     except Exception as e:
         # If snapping fails, try using the original point
         logger.warning("Could not snap point to stream network: %s", e)
@@ -196,18 +171,97 @@ def delineate_catchment(
         else:
             catchment_polygon = polygons[0]
 
-        return catchment_polygon
+        snapped_point = Point(x_snap, y_snap)
+        return catchment_polygon, snapped_point
 
     except Exception as e:
         raise ValueError(f"Failed to convert catchment to polygon: {e}")
+
+
+def delineate_catchment(
+    point: Point,
+    dem_path: Union[str, Path],
+    dirmap: Tuple[int, int, int, int, int, int, int, int] = (64, 128, 1, 2, 4, 8, 16, 32),
+    apply_input_mask: bool = False,
+    nodata_in: Optional[float] = None,
+    nodata_out: Optional[float] = None,
+    pit_fill: bool = True,
+    pit_fill_epsilon: float = 0.0001,
+    resolve_flats: bool = True,
+    routing: str = "d8",
+    flow_acc_threshold: int = 1000,
+) -> Polygon:
+    """
+    Delineate a catchment area for a given point using a Digital Elevation Model (DEM).
+
+    This function uses the pysheds library to perform watershed delineation based on
+    terrain analysis. The workflow includes:
+    1. Loading the DEM raster
+    2. Filling pits and resolving flats
+    3. Computing flow direction
+    4. Computing flow accumulation
+    5. Snapping the pour point to the nearest high-accumulation cell
+    6. Delineating the catchment
+
+    Args:
+        point: A Shapely Point representing the pour point (outlet) in the catchment.
+               Should be in the same coordinate system as the DEM.
+        dem_path: Path to the Digital Elevation Model raster file (e.g., GeoTIFF).
+        dirmap: Direction mapping for flow direction (default is for D8 routing).
+                Format: (N, NE, E, SE, S, SW, W, NW)
+        apply_input_mask: Whether to apply the DEM's nodata mask to operations.
+        nodata_in: Value representing nodata in the input DEM. If None, will use
+                   the raster's nodata value.
+        nodata_out: Value to use for nodata in output arrays. If None, pysheds
+                    manages nodata per step automatically (recommended to avoid
+                    dtype conflicts with NumPy 2.x).
+        pit_fill: Whether to fill pits in the DEM before flow analysis.
+        pit_fill_epsilon: Small value to add when filling pits to ensure drainage.
+        resolve_flats: Whether to resolve flat areas in the DEM.
+        routing: Flow routing algorithm ('d8' or 'dinf'). Default is 'd8'.
+        flow_acc_threshold: Threshold for snapping pour point to stream network.
+                           Higher values = snap to larger streams.
+
+    Returns:
+        A Shapely Polygon representing the delineated catchment boundary.
+
+    Raises:
+        FileNotFoundError: If the DEM file doesn't exist.
+        ValueError: If the point is outside the DEM extent or if catchment
+                    delineation fails.
+
+    Example:
+        >>> from shapely.geometry import Point
+        >>> point = Point(-3.5, 50.7)  # Longitude, Latitude
+        >>> catchment = delineate_catchment(
+        ...     point=point,
+        ...     dem_path="path/to/dem.tif",
+        ...     flow_acc_threshold=1000
+        ... )
+        >>> print(f"Catchment area: {catchment.area} square degrees")
+    """
+    polygon, _snapped = _delineate_catchment_core(
+        point=point,
+        dem_path=dem_path,
+        dirmap=dirmap,
+        apply_input_mask=apply_input_mask,
+        nodata_in=nodata_in,
+        nodata_out=nodata_out,
+        pit_fill=pit_fill,
+        pit_fill_epsilon=pit_fill_epsilon,
+        resolve_flats=resolve_flats,
+        routing=routing,
+        flow_acc_threshold=flow_acc_threshold,
+    )
+    return polygon
 
 
 def delineate_catchment_with_metadata(point: Point, dem_path: Union[str, Path], **kwargs) -> dict:
     """
     Delineate a catchment and return additional metadata about the catchment.
 
-    This is a wrapper around delineate_catchment that also returns useful
-    catchment statistics.
+    This is a wrapper around the core delineation that also returns useful
+    catchment statistics, including the snapped pour point.
 
     Args:
         point: A Shapely Point representing the pour point.
@@ -220,15 +274,18 @@ def delineate_catchment_with_metadata(point: Point, dem_path: Union[str, Path], 
             - 'area': Catchment area (in the units of the CRS)
             - 'centroid': Centroid of the catchment
             - 'bounds': Bounding box of the catchment
-            - 'pour_point': The (possibly snapped) pour point
+            - 'pour_point': The original (unsnapped) pour point
+            - 'snapped_pour_point': The pour point after snapping to the
+              stream network (where the catchment actually drains to)
 
     Example:
         >>> result = delineate_catchment_with_metadata(point, "dem.tif")
         >>> print(f"Catchment area: {result['area']:.2f} km²")
         >>> print(f"Centroid: {result['centroid']}")
+        >>> print(f"Snapped pour point: {result['snapped_pour_point']}")
     """
-    # Delineate catchment
-    catchment = delineate_catchment(point, dem_path, **kwargs)
+    # Delineate catchment using the core function to get the snapped point
+    catchment, snapped_point = _delineate_catchment_core(point, dem_path, **kwargs)
 
     # Calculate metadata
     metadata = {
@@ -237,6 +294,7 @@ def delineate_catchment_with_metadata(point: Point, dem_path: Union[str, Path], 
         "centroid": catchment.centroid,
         "bounds": catchment.bounds,
         "pour_point": point,
+        "snapped_pour_point": snapped_point,
     }
 
     return metadata

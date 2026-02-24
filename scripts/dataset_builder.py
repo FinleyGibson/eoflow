@@ -36,10 +36,11 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 from shapely.geometry import Point, Polygon
 
-from eoflow.catchment import delineate_catchment
+from eoflow.catchment import _delineate_catchment_core
 from eoflow.log_utils import (
     DETAILED_FORMAT,
     disable_library_logging,
@@ -159,14 +160,20 @@ def _build_location_cache(
     gdf: gpd.GeoDataFrame,
     lat_col: str,
     lon_col: str,
-) -> Dict[Tuple[float, float], Polygon]:
-    """Build a dict mapping (lat, lon) → Polygon from already-processed rows."""
-    cache: Dict[Tuple[float, float], Polygon] = {}
+) -> Dict[Tuple[float, float], Tuple[Polygon, Optional[Point]]]:
+    """Build a dict mapping (lat, lon) → (Polygon, snapped_point) from already-processed rows."""
+    cache: Dict[Tuple[float, float], Tuple[Polygon, Optional[Point]]] = {}
     for _, row in gdf.iterrows():
         geom = row.get("catchment")
         if isinstance(geom, Polygon):
             key = (float(row[lat_col]), float(row[lon_col]))
-            cache[key] = geom
+            snap_lon = row.get("snap_longitude")
+            snap_lat = row.get("snap_latitude")
+            if pd.notna(snap_lon) and pd.notna(snap_lat):
+                snap_pt: Optional[Point] = Point(float(snap_lon), float(snap_lat))
+            else:
+                snap_pt = None
+            cache[key] = (geom, snap_pt)
     logger.debug("Built location cache with %d entries", len(cache))
     return cache
 
@@ -259,6 +266,8 @@ def build_dataset(
         gdf = gdf.rename_geometry("catchment")
         gdf["delineation_status"] = ""
         gdf["delineation_error"] = ""
+        gdf["snap_longitude"] = np.nan
+        gdf["snap_latitude"] = np.nan
 
         # If we had a partial checkpoint with a different length, we can
         # still salvage cached polygons keyed by (lat, lon).
@@ -272,8 +281,12 @@ def build_dataset(
                 for idx, row in gdf.iterrows():
                     key = (float(row[lat_col]), float(row[lon_col]))
                     if key in old_cache:
-                        gdf.at[idx, "catchment"] = old_cache[key]
+                        poly, snap_pt = old_cache[key]
+                        gdf.at[idx, "catchment"] = poly
                         gdf.at[idx, "delineation_status"] = "ok"
+                        if snap_pt is not None:
+                            gdf.at[idx, "snap_longitude"] = snap_pt.x
+                            gdf.at[idx, "snap_latitude"] = snap_pt.y
 
     # Build a location cache from whatever we already have
     cache = _build_location_cache(gdf, lat_col, lon_col)
@@ -311,18 +324,25 @@ def build_dataset(
         logger.debug("  Point WKT: %s", point.wkt)
         t0 = time.perf_counter()
         try:
-            polygon = delineate_catchment(
+            polygon, snapped_point = _delineate_catchment_core(
                 point=point,
                 dem_path=dem_path,
                 flow_acc_threshold=flow_acc_threshold,
             )
             elapsed = time.perf_counter() - t0
-            cache[loc_key] = polygon
+            cache[loc_key] = (polygon, snapped_point)
             new_delineations += 1
             status = "ok"
             error_msg = ""
             logger.info("  ✓ Delineated in %.1fs  (area=%.6f)", elapsed, polygon.area)
             logger.debug("  Polygon bounds: %s", polygon.bounds)
+            logger.info(
+                "  Snap offset: (%.6f, %.6f) → (%.6f, %.6f)",
+                lon,
+                lat,
+                snapped_point.x,
+                snapped_point.y,
+            )
         except Exception as exc:
             elapsed = time.perf_counter() - t0
             status = "error"
@@ -336,7 +356,10 @@ def build_dataset(
         n_matching = int(mask.sum())
         logger.debug("  Applying result to %d row(s) with matching coordinates", n_matching)
         if status == "ok":
-            gdf.loc[mask, "catchment"] = cache[loc_key]
+            poly, snap_pt = cache[loc_key]
+            gdf.loc[mask, "catchment"] = poly
+            gdf.loc[mask, "snap_longitude"] = snap_pt.x
+            gdf.loc[mask, "snap_latitude"] = snap_pt.y
         gdf.loc[mask, "delineation_status"] = status
         gdf.loc[mask, "delineation_error"] = error_msg
 

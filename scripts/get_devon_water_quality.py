@@ -1,289 +1,470 @@
 """
-Get water quality data for Southwest England and Devon using shapefile filtering.
+Fetch water quality data from the Environment Agency API for Devon only.
 
-This script demonstrates how to:
-1. Load the Counties and Unitary Authorities shapefile
-2. Extract the Devon boundary geometry
-3. Fetch water quality data from the Environment Agency API
-4. Filter to Southwest England region only
-5. Filter Southwest data to only include samples within Devon boundaries
-6. Save two CSV files: one for all Southwest samples, one for Devon only
+This script follows the same month-by-month checkpointed approach as
+:mod:`scripts.get_ea_water_quality`, but additionally filters each month's
+results to the Devon county boundary using
+:meth:`eoflow.ea.EAWaterQualityAPI.filter_by_polygon`.
 
-This approach works around the issue where precanned area codes like
-'environment_agency,SWX' return 400 errors from the EA API by:
-- Fetching data without area filters
-- Filtering by region name to get Southwest samples only
-- Using shapefile-based polygon filtering to select Devon samples
+Because precanned EA area codes (e.g. ``environment_agency,SWX``) often
+return 400 errors, data is fetched without a geographic filter and then
+clipped to the Devon polygon extracted from a local shapefile.
 
-Output files:
-    - southwest_water_quality_samples.csv: All Southwest England samples
-    - devon_water_quality.csv: Devon-only samples (subset of Southwest)
+Usage
+-----
+    python -m scripts.get_devon_water_quality \
+        --determinand 0076 \
+        --start-date 2023-01-01 \
+        --end-date 2023-12-31 \
+        --out data/devon_temperature_2023.csv
 
-IMPORTANT LIMITATION:
-    The EA API has a 2500 record limit per request. When fetching all areas
-    (area=None), you may not get Southwest/Devon data in the first 2500 records.
+    # Optional flags
+        --shapefile data/devon_county       # path to Devon shapefile dir
+        --delay 0.5                         # seconds between API requests
+        --timeout 60                        # per-request timeout
+        --checkpoint-dir .checkpoints       # where to keep state files
+        --verbose / --quiet                 # control console output
 
-    For reliable Devon data extraction, consider:
-    - Using shorter date ranges (e.g., 1 week at a time)
-    - Fetching multiple months and combining results
-    - Or using the original date range but being aware you may get 0 records
+Checkpoint / crash-recovery
+---------------------------
+Each run derives a deterministic *run key* from (determinand, start_date,
+end_date, "devon").  Completed months are recorded in a JSON state file
+under ``--checkpoint-dir``.  If the script is re-started with the same
+parameters, it skips already-fetched months and appends only the missing
+ones to the output CSV.
 
-Usage:
-    python scripts/get_devon_water_quality.py
-
-Note: You may need to adjust the shapefile_path in the main() function
-to match your local data directory.
+Common determinand codes
+------------------------
+* ``0076`` – Temperature of Water
+* ``0077`` – Conductivity at 25 °C
+* ``0180`` – Orthophosphate, reactive as P
+* ``6396`` – Turbidity (NTU)
 """
 
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import geopandas as gpd
 import pandas as pd
 
 from eoflow.ea import EAWaterQualityAPI
-from eoflow.utils import load_shapefile
 from eoflow.log_utils import get_logger
+from eoflow.utils import load_shapefile
 
 logger = get_logger(__name__)
 
+# Default shapefile path (relative to the repository root)
+_DEFAULT_SHAPEFILE = Path(__file__).resolve().parent.parent / "data" / "devon_county"
 
-def get_polygon_coords(gdf: gpd.GeoDataFrame) -> List[Tuple[float, float]]:
-    """
-    Extract polygon coordinates from a GeoDataFrame.
+# ---------------------------------------------------------------------------
+# Polygon helpers
+# ---------------------------------------------------------------------------
 
-    Returns a list of (lon, lat) tuples suitable for the EA API filter.
-    If the geometry is a MultiPolygon, uses the largest polygon.
+
+def extract_polygon_from_geodataframe(
+    gdf: gpd.GeoDataFrame,
+) -> List[Tuple[float, float]]:
+    """Extract polygon coordinates from a GeoDataFrame.
+
+    If the geometry is a MultiPolygon the largest polygon (by area) is used.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        GeoDataFrame containing at least one feature.
+
+    Returns
+    -------
+    list of (lon, lat) tuples
     """
     geom = gdf.geometry.iloc[0]
 
-    # Handle MultiPolygon by taking the largest polygon
-    if geom.geom_type == 'MultiPolygon':
-        logger.info("Geometry is MultiPolygon, extracting largest polygon")
-        # Get the polygon with the largest area
+    if geom.geom_type == "MultiPolygon":
+        logger.info("Geometry is MultiPolygon – using largest polygon")
         largest_poly = max(geom.geoms, key=lambda p: p.area)
         coords = list(largest_poly.exterior.coords)
-    elif geom.geom_type == 'Polygon':
+    elif geom.geom_type == "Polygon":
         coords = list(geom.exterior.coords)
     else:
         raise ValueError(f"Unexpected geometry type: {geom.geom_type}")
 
-    # Return as list of (lon, lat) tuples
     return coords
 
 
-def main():
-    """Main function to fetch and filter Southwest and Devon water quality data.
+def load_devon_polygon(shapefile_path: Path) -> List[Tuple[float, float]]:
+    """Load the Devon county shapefile and return its polygon in WGS84.
 
-    Returns:
-        tuple: (southwest_data, devon_data) - DataFrames with Southwest samples and Devon-filtered samples
+    Parameters
+    ----------
+    shapefile_path : Path
+        Path to the shapefile (directory or ``.shp`` file).
+
+    Returns
+    -------
+    list of (lon, lat) tuples
     """
+    gdf = load_shapefile(shapefile_path)
+    logger.info("Loaded shapefile with %d feature(s)", len(gdf))
 
-    # Configuration
-    # Update this path to match your local data directory
-    shapefile_path = Path("/home/finley/Work/RDS/projects/enforce/data/Counties_and_Unitary_Authorities_December_2023_Boundaries")
+    # Reproject to WGS84 if necessary
+    if gdf.crs is not None and gdf.crs != "EPSG:4326":
+        logger.info("Reprojecting from %s to EPSG:4326", gdf.crs)
+        gdf = gdf.to_crs("EPSG:4326")
 
-    # Determinand codes:
-    # 0076 = Water Temperature
-    # 0077 = Conductivity at 25°C
-    # 0180 = Orthophosphate, reactive as P
-    # 6396 = Turbidity (NTU)
-    determinand = "6396"  # Water turbidity
-    # NOTE: Using a shorter date range to increase likelihood of getting Southwest data
-    # The API limit is 2500 records, and all-area queries often return Anglian region first
-    start_date = "2020-01-01"
-    end_date = "2020-06-01"  # 1 week to start
+    polygon_coords = extract_polygon_from_geodataframe(gdf)
+    logger.info("Devon polygon extracted: %d vertices", len(polygon_coords))
+    return polygon_coords
 
-    print(f"\nFetching Devon water quality data...")
-    print(f"Determinand: {determinand}")
-    print(f"Date range: {start_date} to {end_date}\n")
 
-    # Step 1: Load the shapefile
-    logger.info(f"Loading shapefile from {shapefile_path}")
-    try:
-        gdf = load_shapefile(shapefile_path)
-        logger.info(f"Loaded shapefile with {len(gdf)} features")
-        logger.info(f"Available regions: {sorted(gdf['CTYUA23NM'].unique())}")
-    except FileNotFoundError as e:
-        logger.error(f"Shapefile not found: {e}")
-        print(f"\nERROR: Could not find shapefile at {shapefile_path}")
-        print("Please update the shapefile_path variable in the script.")
-        return None, None
+# ---------------------------------------------------------------------------
+# State / checkpoint helpers
+# ---------------------------------------------------------------------------
 
-    # Step 2: Select Devon
-    logger.info("Filtering for Devon")
-    devon_gdf = gdf[gdf["CTYUA23NM"] == "Devon"]
+_STATE_VERSION = 1
 
-    if devon_gdf.empty:
-        logger.error("Devon not found in shapefile!")
-        return None, None
 
-    logger.info(f"Devon boundary found with CRS: {devon_gdf.crs}")
+def _run_key(
+    determinand: str,
+    start_date: str,
+    end_date: str,
+) -> str:
+    """Return a short, filesystem-safe hash identifying a unique run."""
+    raw = f"{determinand}|devon|{start_date}|{end_date}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    # Ensure the GeoDataFrame is in WGS84 (EPSG:4326) for lat/lon coordinates
-    if devon_gdf.crs != "EPSG:4326":
-        logger.info(f"Reprojecting from {devon_gdf.crs} to EPSG:4326")
-        devon_gdf = devon_gdf.to_crs("EPSG:4326")
 
-    # Step 3: Extract polygon coordinates
-    polygon_coords = get_polygon_coords(devon_gdf)
-    logger.info(f"Extracted polygon with {len(polygon_coords)} vertices")
+def _state_path(checkpoint_dir: Path, key: str) -> Path:
+    return checkpoint_dir / f"devon_wq_{key}.state.json"
 
-    # Get bounding box for reference
-    bounds = devon_gdf.total_bounds  # minx, miny, maxx, maxy
-    logger.info(f"Devon bounding box: lon=[{bounds[0]:.4f}, {bounds[2]:.4f}], "
-                f"lat=[{bounds[1]:.4f}, {bounds[3]:.4f}]")
 
-    # Step 4: Fetch water quality data
-    logger.info(f"Fetching water quality data for determinand {determinand}")
-    logger.info(f"Date range: {start_date} to {end_date}")
-    logger.info("Note: Fetching all areas (no area filter) to avoid API limitations")
-    print("\nFetching data from Environment Agency API...")
-    print("This may take several minutes depending on the date range...")
-    print("\nIMPORTANT: The API has a 2500 record limit. When fetching all areas,")
-    print("you may not get Southwest/Devon data. Use shorter date ranges for better results.\n")
+def _load_state(path: Path) -> Dict[str, Any]:
+    """Load checkpoint state from disk, or return a fresh state dict."""
+    if path.exists():
+        try:
+            with open(path) as fh:
+                state = json.load(fh)
+            logger.info("Loaded checkpoint state from %s", path)
+            return state
+        except Exception:
+            logger.warning("Could not read state file %s – starting fresh", path)
+    return {"version": _STATE_VERSION, "completed_months": []}
 
-    api = EAWaterQualityAPI(delay=0.5, timeout=30)
 
-    try:
-        # Get data without area filter (since precanned areas don't seem to work)
-        # This will fetch ALL water quality data for the determinand, which we'll
-        # then filter using the Devon polygon
-        df = api.get_data(
-            determinand=determinand,
-            start_date=start_date,
-            end_date=end_date,
-            area="environment_agency,DCS",
-            verbose=True,
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch data from EA API: {e}")
-        print(f"\nERROR: Could not fetch data from EA API: {e}")
-        return None, None
+def _save_state(path: Path, state: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(state, fh, indent=2)
+    logger.debug("State saved to %s", path)
 
-    if df.empty:
-        logger.warning("No data retrieved from API")
-        print("\n✗ No data retrieved. Try a different date range.")
-        return None, None
 
-    logger.info(f"Retrieved {len(df)} total observations")
+def _completed_set(state: Dict[str, Any]) -> Set[str]:
+    """Return a set of 'YYYY-MM-DD/YYYY-MM-DD' strings for completed months."""
+    return set(state.get("completed_months", []))
 
-    # Check what regions we got
-    if "samplingPoint.region" in df.columns:
-        regions = df["samplingPoint.region"].value_counts()
-        logger.info(f"Regions in data: {regions.to_dict()}")
-        print(f"\n  Regions in data:")
-        for region, count in regions.items():
-            print(f"    - {region}: {count:,} records")
 
-    # Step 5: Filter to Southwest England only
-    logger.info("Filtering to Southwest region")
-    print("\nFiltering to Southwest England...")
+def _append_csv(df: pd.DataFrame, path: Path) -> None:
+    """Append rows to a CSV file, writing headers only if the file is new."""
+    write_header = not path.exists() or path.stat().st_size == 0
+    df.to_csv(path, mode="a", index=False, header=write_header)
 
-    if "samplingPoint.region" in df.columns:
-        # Filter for Southwest region
-        southwest_df = df[df["samplingPoint.region"].str.contains("South", case=False, na=False)]
-        logger.info(f"Found {len(southwest_df)} Southwest observations")
-        print(f"  Southwest records: {len(southwest_df):,}")
 
-        if southwest_df.empty:
-            logger.warning("No Southwest region data in results - try different dates or shorter range")
-            print("\n✗ No Southwest data found. Try different dates or shorter date range.")
-            return None, None
-    else:
-        logger.warning("No region column found - cannot filter to Southwest")
-        southwest_df = df
+# ---------------------------------------------------------------------------
+# Core fetch logic
+# ---------------------------------------------------------------------------
 
-    # Save Southwest samples to CSV
-    southwest_samples_path = Path("southwest_water_quality_samples.csv")
-    southwest_df.to_csv(southwest_samples_path, index=False)
-    logger.info(f"Southwest samples saved to {southwest_samples_path}")
-    print(f"\n✓ Southwest samples saved to {southwest_samples_path}")
-    print(f"  Total Southwest records: {len(southwest_df):,}")
 
-    # Step 6: Filter by Devon polygon
-    logger.info("Filtering Southwest observations to Devon boundaries")
-    print("\nFiltering Southwest data to Devon boundaries...")
-    devon_df = api.filter_by_polygon(
-        df=southwest_df,  # Filter from Southwest data, not all data
-        polygon=polygon_coords,
-        # Columns will be auto-detected (easting/northing or lat/lon)
+def fetch_devon_water_quality(
+    determinand: str,
+    start_date: str,
+    end_date: str,
+    output_path: Path,
+    *,
+    shapefile_path: Path = _DEFAULT_SHAPEFILE,
+    delay: float = 0.5,
+    timeout: int = 60,
+    checkpoint_dir: Path = Path(".checkpoints"),
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Download EA water quality data for Devon month-by-month with checkpointing.
+
+    Data is fetched from the EA API without a geographic filter, then
+    filtered to the Devon county boundary using
+    :meth:`~eoflow.ea.EAWaterQualityAPI.filter_by_polygon`.
+
+    Parameters
+    ----------
+    determinand : str
+        EA determinand code (e.g. ``"0076"``).
+    start_date, end_date : str
+        Date range in ``YYYY-MM-DD`` format.
+    output_path : Path
+        Destination CSV file.  Data is appended after each month.
+    shapefile_path : Path
+        Path to the Devon county shapefile (directory or ``.shp`` file).
+    delay : float
+        Seconds to wait between API requests.
+    timeout : int
+        Per-request timeout in seconds.
+    checkpoint_dir : Path
+        Directory for JSON state files.
+    verbose : bool
+        Whether to print progress to the console.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The combined data (all months, including previously checkpointed ones).
+    """
+    # ------------------------------------------------------------------
+    # Load the Devon polygon
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"\nLoading Devon boundary from {shapefile_path} …")
+
+    polygon_coords = load_devon_polygon(shapefile_path)
+
+    if verbose:
+        print(f"  ✓ Devon polygon loaded ({len(polygon_coords)} vertices)")
+
+    # ------------------------------------------------------------------
+    # Set up checkpointing
+    # ------------------------------------------------------------------
+    key = _run_key(determinand, start_date, end_date)
+    state_file = _state_path(checkpoint_dir, key)
+    state = _load_state(state_file)
+    completed = _completed_set(state)
+
+    api = EAWaterQualityAPI(delay=delay, timeout=timeout)
+
+    # Generate the full list of month windows.
+    dt_start = datetime.strptime(start_date, "%Y-%m-%d")
+    dt_end = datetime.strptime(end_date, "%Y-%m-%d")
+    month_ranges: List[Tuple[datetime, datetime]] = api._generate_month_ranges(dt_start, dt_end)
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_total = len(month_ranges)
+    n_skipped = 0
+    n_fetched = 0
+    n_records = 0
+
+    if verbose:
+        print("\nDevon Water Quality data download")
+        print(f"  Determinand : {determinand}")
+        print(f"  Date range  : {start_date} → {end_date}")
+        print("  Region      : Devon (polygon filter)")
+        print(f"  Output      : {output_path}")
+        print(f"  Months      : {n_total}")
+        already = len(completed)
+        if already:
+            print(f"  Resuming    : {already} month(s) already fetched")
+        print()
+
+    # ------------------------------------------------------------------
+    # Month-by-month download and filter
+    # ------------------------------------------------------------------
+    for idx, (m_start, m_end) in enumerate(month_ranges, start=1):
+        month_key = f"{m_start:%Y-%m-%d}/{m_end:%Y-%m-%d}"
+
+        if month_key in completed:
+            n_skipped += 1
+            if verbose:
+                logger.info("[%d/%d] %s – already fetched, skipping", idx, n_total, month_key)
+            continue
+
+        if verbose:
+            logger.info("[%d/%d] Fetching %s …", idx, n_total, month_key)
+
+        # Fetch without area filter – we rely on polygon filtering instead.
+        try:
+            df = api._make_request(
+                determinand=determinand,
+                date_from=f"{m_start:%Y-%m-%d}",
+                date_to=f"{m_end:%Y-%m-%d}",
+                precanned_area=None,
+            )
+        except Exception as exc:
+            logger.error("  ✗ Request failed for %s: %s", month_key, exc)
+            # Don't mark as completed – it will be retried on the next run.
+            continue
+
+        rows = 0
+        if df is not None and not df.empty:
+            # Drop rows with missing results (consistent with get_data)
+            df = df.dropna(subset=["result"])
+
+            if not df.empty:
+                # Filter to Devon polygon
+                try:
+                    df = api.filter_by_polygon(df=df, polygon=polygon_coords)
+                except Exception as exc:
+                    logger.error("  ✗ Polygon filter failed for %s: %s", month_key, exc)
+                    continue
+
+                rows = len(df)
+                if rows:
+                    _append_csv(df, output_path)
+
+        n_fetched += 1
+        n_records += rows
+
+        # Mark this month as completed and persist state.
+        state["completed_months"].append(month_key)
+        completed.add(month_key)
+        _save_state(state_file, state)
+
+        if verbose:
+            logger.info("  ✓ %d records in Devon", rows)
+
+        # Polite delay between requests (skip after last month).
+        if idx < n_total:
+            time.sleep(delay)
+
+    # ------------------------------------------------------------------
+    # Summary
+    # ------------------------------------------------------------------
+    if verbose:
+        print()
+        print("=" * 60)
+        print("Download complete")
+        print(f"  Months fetched this run : {n_fetched}")
+        print(f"  Months skipped (cached) : {n_skipped}")
+        print(f"  Records written (Devon) : {n_records}")
+        if output_path.exists():
+            print(f"  Output file             : {output_path}")
+        print("=" * 60)
+        print()
+
+    # Return the full combined dataset from the output CSV.
+    if output_path.exists() and output_path.stat().st_size > 0:
+        combined = pd.read_csv(output_path)
+        logger.info("Total records in output file: %d", len(combined))
+        return combined
+
+    logger.warning("No data collected for Devon.")
+    return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Download water quality data from the Environment Agency API "
+        "filtered to the Devon county boundary, with automatic "
+        "checkpointing and crash recovery.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    p.add_argument(
+        "--determinand",
+        required=True,
+        help=(
+            "EA determinand code.  Common codes: "
+            "0076 (Temperature), 0077 (Conductivity), "
+            "0180 (Orthophosphate), 6396 (Turbidity)."
+        ),
+    )
+    p.add_argument(
+        "--start-date",
+        required=True,
+        help="Start date in YYYY-MM-DD format.",
+    )
+    p.add_argument(
+        "--end-date",
+        required=True,
+        help="End date in YYYY-MM-DD format.",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=Path("devon_water_quality.csv"),
+        help="Output CSV path.",
+    )
+    p.add_argument(
+        "--shapefile",
+        type=Path,
+        default=_DEFAULT_SHAPEFILE,
+        help="Path to the Devon county shapefile (directory or .shp file).",
+    )
+    p.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Seconds to wait between API requests.",
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Per-request timeout in seconds.",
+    )
+    p.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=Path(".checkpoints"),
+        help="Directory for checkpoint state files.",
+    )
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        default=True,
+        help="Print progress messages.",
+    )
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Suppress progress messages.",
+    )
+    args = p.parse_args(argv)
+    if args.quiet:
+        args.verbose = False
+    return args
 
-    if devon_df.empty:
-        logger.warning("No observations found within Devon boundaries")
-        print("\n✗ No Devon observations found in this data.")
-        print("   The API returned data from other regions (2500 record limit).")
-        print("   Try:")
-        print("   - A shorter date range (e.g., 1 week instead of 1 month)")
-        print("   - Different dates (summer months may have more samples)")
-        print("   - Multiple smaller queries combined together")
-        return southwest_df, None
 
-    logger.info(f"Found {len(devon_df)} observations within Devon")
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
 
-    # Step 7: Display summary statistics
-    print("\n" + "="*80)
-    print("DEVON WATER QUALITY DATA SUMMARY")
-    print("="*80)
-    print(f"Determinand: {determinand} (Water Temperature)")
-    print(f"Date range: {start_date} to {end_date}")
-    print(f"Total observations: {len(devon_df)}")
+    # Validate dates
+    for label, val in [("start-date", args.start_date), ("end-date", args.end_date)]:
+        try:
+            datetime.strptime(val, "%Y-%m-%d")
+        except ValueError:
+            logger.error("Invalid %s: %s  (expected YYYY-MM-DD)", label, val)
+            sys.exit(1)
 
-    site_col = "samplingPoint.prefLabel" if "samplingPoint.prefLabel" in devon_df.columns else "samplingPoint.notation"
-    if site_col in devon_df.columns:
-        unique_sites = devon_df[site_col].nunique()
-        print(f"Unique sampling sites: {unique_sites}")
-
-    if "result" in devon_df.columns:
-        devon_df["result_numeric"] = pd.to_numeric(devon_df["result"], errors="coerce")
-        print(f"\nTemperature statistics (°C):")
-        print(f"  Mean: {devon_df['result_numeric'].mean():.2f}")
-        print(f"  Min: {devon_df['result_numeric'].min():.2f}")
-        print(f"  Max: {devon_df['result_numeric'].max():.2f}")
-        print(f"  Median: {devon_df['result_numeric'].median():.2f}")
-
-    print("="*80 + "\n")
-
-    # Display first few rows
-    print("First 5 observations:")
-    display_cols = [
-        "phenomenonTime",
-        "samplingPoint.prefLabel",
-        "result",
-        "samplingPoint.easting",
-        "samplingPoint.northing",
-    ]
-    available_cols = [col for col in display_cols if col in devon_df.columns]
-    print(devon_df[available_cols].head())
-
-    return southwest_df, devon_df
+    try:
+        fetch_devon_water_quality(
+            determinand=args.determinand,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            output_path=args.out,
+            shapefile_path=args.shapefile,
+            delay=args.delay,
+            timeout=args.timeout,
+            checkpoint_dir=args.checkpoint_dir,
+            verbose=args.verbose,
+        )
+    except KeyboardInterrupt:
+        print("\n\nInterrupted – progress has been checkpointed.")
+        logger.info("Script interrupted by user")
+        sys.exit(130)
+    except Exception as exc:
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        print(f"\n✗ ERROR: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        southwest_data, devon_data = main()
-
-        # Save Devon data to CSV
-        if devon_data is not None and len(devon_data) > 0:
-            output_path = Path("devon_water_quality.csv")
-            devon_data.to_csv(output_path, index=False)
-            logger.info(f"Devon data saved to {output_path}")
-            print(f"\n✓ Devon data saved to {output_path}")
-            print(f"✓ Total Devon records: {len(devon_data):,}")
-        else:
-            print("\n✗ No Devon data to save")
-
-        # Note: Southwest data already saved in main()
-        if southwest_data is not None:
-            print(f"\nSummary:")
-            print(f"  Southwest samples: {len(southwest_data):,} (saved to southwest_water_quality_samples.csv)")
-            if devon_data is not None:
-                print(f"  Devon samples: {len(devon_data):,} (saved to devon_water_quality.csv)")
-    except KeyboardInterrupt:
-        print("\n\nScript interrupted by user")
-        logger.info("Script interrupted by user")
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        print(f"\n✗ ERROR: {e}")
-        raise
+    main()
