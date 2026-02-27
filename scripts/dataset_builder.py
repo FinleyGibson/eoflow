@@ -160,9 +160,9 @@ def _build_location_cache(
     gdf: gpd.GeoDataFrame,
     lat_col: str,
     lon_col: str,
-) -> Dict[Tuple[float, float], Tuple[Polygon, Optional[Point]]]:
-    """Build a dict mapping (lat, lon) → (Polygon, snapped_point) from already-processed rows."""
-    cache: Dict[Tuple[float, float], Tuple[Polygon, Optional[Point]]] = {}
+) -> Dict[Tuple[float, float], Tuple[Polygon, Optional[Point], float]]:
+    """Build a dict mapping (lat, lon) → (Polygon, snapped_point, flow_acc) from already-processed rows."""
+    cache: Dict[Tuple[float, float], Tuple[Polygon, Optional[Point], float]] = {}
     for _, row in gdf.iterrows():
         geom = row.get("catchment")
         if isinstance(geom, Polygon):
@@ -173,7 +173,9 @@ def _build_location_cache(
                 snap_pt: Optional[Point] = Point(float(snap_lon), float(snap_lat))
             else:
                 snap_pt = None
-            cache[key] = (geom, snap_pt)
+            raw_acc = row.get("flow_acc_at_pour_point", float("nan"))
+            flow_acc = float(raw_acc) if pd.notna(raw_acc) else float("nan")
+            cache[key] = (geom, snap_pt, flow_acc)
     logger.debug("Built location cache with %d entries", len(cache))
     return cache
 
@@ -268,6 +270,7 @@ def build_dataset(
         gdf["delineation_error"] = ""
         gdf["snap_longitude"] = np.nan
         gdf["snap_latitude"] = np.nan
+        gdf["flow_acc_at_pour_point"] = np.nan
 
         # If we had a partial checkpoint with a different length, we can
         # still salvage cached polygons keyed by (lat, lon).
@@ -281,12 +284,13 @@ def build_dataset(
                 for idx, row in gdf.iterrows():
                     key = (float(row[lat_col]), float(row[lon_col]))
                     if key in old_cache:
-                        poly, snap_pt = old_cache[key]
+                        poly, snap_pt, flow_acc = old_cache[key]
                         gdf.at[idx, "catchment"] = poly
                         gdf.at[idx, "delineation_status"] = "ok"
                         if snap_pt is not None:
                             gdf.at[idx, "snap_longitude"] = snap_pt.x
                             gdf.at[idx, "snap_latitude"] = snap_pt.y
+                        gdf.at[idx, "flow_acc_at_pour_point"] = flow_acc
 
     # Build a location cache from whatever we already have
     cache = _build_location_cache(gdf, lat_col, lon_col)
@@ -324,13 +328,13 @@ def build_dataset(
         logger.debug("  Point WKT: %s", point.wkt)
         t0 = time.perf_counter()
         try:
-            polygon, snapped_point = _delineate_catchment_core(
+            polygon, snapped_point, flow_acc = _delineate_catchment_core(
                 point=point,
                 dem_path=dem_path,
                 flow_acc_threshold=flow_acc_threshold,
             )
             elapsed = time.perf_counter() - t0
-            cache[loc_key] = (polygon, snapped_point)
+            cache[loc_key] = (polygon, snapped_point, flow_acc)
             new_delineations += 1
             status = "ok"
             error_msg = ""
@@ -343,6 +347,7 @@ def build_dataset(
                 snapped_point.x,
                 snapped_point.y,
             )
+            logger.info("  Flow accumulation at pour point: %.0f cells", flow_acc)
         except Exception as exc:
             elapsed = time.perf_counter() - t0
             status = "error"
@@ -356,10 +361,11 @@ def build_dataset(
         n_matching = int(mask.sum())
         logger.debug("  Applying result to %d row(s) with matching coordinates", n_matching)
         if status == "ok":
-            poly, snap_pt = cache[loc_key]
+            poly, snap_pt, flow_acc = cache[loc_key]
             gdf.loc[mask, "catchment"] = poly
             gdf.loc[mask, "snap_longitude"] = snap_pt.x
             gdf.loc[mask, "snap_latitude"] = snap_pt.y
+            gdf.loc[mask, "flow_acc_at_pour_point"] = flow_acc
         gdf.loc[mask, "delineation_status"] = status
         gdf.loc[mask, "delineation_error"] = error_msg
 

@@ -1,7 +1,8 @@
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import numpy as np
+import rasterio
 from pysheds.grid import Grid
 from shapely.geometry import Point, Polygon, shape
 
@@ -22,21 +23,24 @@ def _delineate_catchment_core(
     resolve_flats: bool = True,
     routing: str = "d8",
     flow_acc_threshold: int = 1000,
-) -> Tuple[Polygon, Point]:
+) -> Tuple[Polygon, Point, float]:
     """
-    Core catchment delineation returning both polygon and snapped pour point.
+    Core catchment delineation returning polygon, snapped pour point, and flow accumulation.
 
     This is the internal workhorse used by :func:`delineate_catchment` and
     :func:`delineate_catchment_with_metadata`.  It returns a tuple of
-    ``(catchment_polygon, snapped_pour_point)`` so callers can see where
-    the pour point was snapped to on the stream network.
+    ``(catchment_polygon, snapped_pour_point, flow_acc_at_pour_point)`` so
+    callers can see where the pour point was snapped to on the stream network
+    and how much upstream area drains to it.
 
     See :func:`delineate_catchment` for full parameter documentation.
 
     Returns:
-        A tuple of (Polygon, Point) where:
+        A tuple of (Polygon, Point, float) where:
             - Polygon is the delineated catchment boundary
             - Point is the snapped pour point on the stream network
+            - float is the flow-accumulation value (upstream cell count) at
+              the snapped pour point; ``nan`` if it could not be determined
     """
     # Validate inputs
     dem_path = Path(dem_path)
@@ -136,6 +140,16 @@ def _delineate_catchment_core(
         logger.warning("Using original point coordinates: (%.6f, %.6f)", x, y)
         x_snap, y_snap = x, y
 
+    # Retrieve the flow-accumulation value at the (snapped) pour point
+    try:
+        col, row = grid.nearest_cell(x_snap, y_snap)
+        # nearest_cell may return numpy scalars or 0-d arrays; use int() to be safe
+        acc_val = np.array(acc)[int(row), int(col)]
+        flow_acc_at_pour_point = float(np.asarray(acc_val).flat[0])
+    except Exception:
+        flow_acc_at_pour_point = float("nan")
+        logger.debug("Could not read flow-accumulation at pour point; storing nan")
+
     # Step 6: Delineate the catchment
     try:
         catch = grid.catchment(
@@ -172,7 +186,7 @@ def _delineate_catchment_core(
             catchment_polygon = polygons[0]
 
         snapped_point = Point(x_snap, y_snap)
-        return catchment_polygon, snapped_point
+        return catchment_polygon, snapped_point, flow_acc_at_pour_point
 
     except Exception as e:
         raise ValueError(f"Failed to convert catchment to polygon: {e}")
@@ -240,7 +254,7 @@ def delineate_catchment(
         ... )
         >>> print(f"Catchment area: {catchment.area} square degrees")
     """
-    polygon, _snapped = _delineate_catchment_core(
+    polygon, _snapped, _acc = _delineate_catchment_core(
         point=point,
         dem_path=dem_path,
         dirmap=dirmap,
@@ -285,7 +299,9 @@ def delineate_catchment_with_metadata(point: Point, dem_path: Union[str, Path], 
         >>> print(f"Snapped pour point: {result['snapped_pour_point']}")
     """
     # Delineate catchment using the core function to get the snapped point
-    catchment, snapped_point = _delineate_catchment_core(point, dem_path, **kwargs)
+    catchment, snapped_point, flow_acc_at_pour_point = _delineate_catchment_core(
+        point, dem_path, **kwargs
+    )
 
     # Calculate metadata
     metadata = {
@@ -295,6 +311,122 @@ def delineate_catchment_with_metadata(point: Point, dem_path: Union[str, Path], 
         "bounds": catchment.bounds,
         "pour_point": point,
         "snapped_pour_point": snapped_point,
+        "flow_acc_at_pour_point": flow_acc_at_pour_point,
     }
 
     return metadata
+
+
+# ---------------------------------------------------------------------------
+# Standalone flow-accumulation computation (for raster overlays / analysis)
+# ---------------------------------------------------------------------------
+
+
+def compute_flow_accumulation(
+    dem_path: Union[str, Path],
+    dirmap: Tuple[int, int, int, int, int, int, int, int] = (64, 128, 1, 2, 4, 8, 16, 32),
+    routing: str = "d8",
+    pit_fill: bool = True,
+    pit_fill_epsilon: float = 0.0001,
+    resolve_flats: bool = True,
+    apply_input_mask: bool = False,
+) -> Tuple[np.ndarray, Any, Any]:
+    """Compute flow accumulation for an entire DEM raster.
+
+    Runs the standard pysheds hydrological conditioning pipeline
+    (pit-fill → resolve flats → flow direction → accumulation) on the
+    supplied DEM and returns the resulting accumulation grid together with
+    the rasterio ``Affine`` transform and CRS so the array can be
+    reprojected for display.
+
+    Parameters
+    ----------
+    dem_path : str or Path
+        Path to a GeoTIFF DEM.
+    dirmap : tuple
+        D8 direction mapping.  Default is the pysheds convention
+        ``(N, NE, E, SE, S, SW, W, NW) = (64, 128, 1, 2, 4, 8, 16, 32)``.
+    routing : str
+        Flow-routing algorithm.  Only ``"d8"`` is currently supported.
+    pit_fill : bool
+        Whether to fill pits before computing flow direction.
+    pit_fill_epsilon : float
+        Epsilon used when resolving flats.
+    resolve_flats : bool
+        Whether to resolve flat areas.
+    apply_input_mask : bool
+        Whether to apply the DEM nodata mask to the accumulation step.
+
+    Returns
+    -------
+    acc_array : numpy.ndarray, shape (H, W), dtype float64
+        Flow-accumulation values.  Cells with no valid data are ``nan``.
+        Valid cells hold the number of upstream cells (≥ 1).
+    transform : rasterio.transform.Affine
+        Affine transform mapping pixel coordinates to the DEM's native CRS.
+    crs : rasterio.crs.CRS
+        Coordinate reference system of the DEM.
+
+    Raises
+    ------
+    FileNotFoundError
+        If *dem_path* does not exist.
+    ValueError
+        If an unsupported *routing* algorithm is requested.
+    """
+    dem_path = Path(dem_path)
+    if not dem_path.exists():
+        raise FileNotFoundError(f"DEM file not found: {dem_path}")
+
+    logger.info("Computing flow accumulation for %s …", dem_path.name)
+
+    # Read CRS and transform from rasterio (pysheds doesn't expose CRS).
+    with rasterio.open(str(dem_path)) as src:
+        crs = src.crs
+
+    # Hydrological conditioning via pysheds
+    grid = Grid.from_raster(str(dem_path))
+    dem = grid.read_raster(str(dem_path))
+
+    _dem_nodata = getattr(dem, "nodata", None)
+    if _dem_nodata is not None and np.issubdtype(np.array(_dem_nodata).dtype, np.floating):
+        _int_nodata_out: dict = {"nodata_out": np.int64(0)}
+        logger.debug("DEM nodata is float (%s) – using nodata_out=0 for integer steps", _dem_nodata)
+    else:
+        _int_nodata_out = {}
+
+    if pit_fill:
+        pit_filled_dem = grid.fill_pits(dem)
+        if resolve_flats:
+            inflated_dem = grid.resolve_flats(pit_filled_dem, eps=pit_fill_epsilon)
+        else:
+            inflated_dem = pit_filled_dem
+    else:
+        inflated_dem = dem
+
+    if routing.lower() != "d8":
+        raise ValueError(f"Unsupported routing method: {routing!r}. Only 'd8' is supported.")
+
+    fdir = grid.flowdir(inflated_dem, dirmap=dirmap, routing=routing, **_int_nodata_out)
+    acc = grid.accumulation(
+        fdir,
+        dirmap=dirmap,
+        routing=routing,
+        apply_input_mask=apply_input_mask,
+        **_int_nodata_out,
+    )
+
+    # Convert to float64 and mask nodata (0 when _int_nodata_out was used,
+    # otherwise the raster nodata – accumulation is always ≥ 1 for valid cells).
+    acc_array = np.array(acc, dtype=np.float64)
+    nodata_val = 0 if _int_nodata_out else getattr(acc, "nodata", None)
+    if nodata_val is not None:
+        acc_array[acc_array == nodata_val] = np.nan
+
+    transform = acc.affine
+    logger.info(
+        "Flow accumulation computed: shape=%s, max=%.0f",
+        acc_array.shape,
+        float(np.nanmax(acc_array)) if not np.all(np.isnan(acc_array)) else 0,
+    )
+    return acc_array, transform, crs

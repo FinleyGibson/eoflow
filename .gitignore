@@ -195,3 +195,6 @@ cspell.json
 data_examples
 data/
 *.csv
+
+# outputs
+outputs/

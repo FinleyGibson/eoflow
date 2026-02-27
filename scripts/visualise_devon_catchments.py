@@ -7,6 +7,7 @@ DEM GeoTIFF, then displays:
 
 * The Devon county boundary (from the shapefile)
 * A semi-transparent DEM elevation overlay
+* A flow-accumulation overlay highlighting the drainage network
 * Delineated catchment polygons colour-coded by turbidity (or another
   value column)
 * Sample-point markers with informative popups
@@ -28,7 +29,9 @@ Usage
         --value-column result \
         --output devon_catchments_map.html \
         --opacity 0.5 \
-        --max-pixels 2048
+        --max-pixels 2048 \
+        --flow-acc-threshold 100 \
+        --no-flow-acc
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from rasterio.coords import BoundingBox
 from rasterio.enums import Resampling
 from rasterio.warp import calculate_default_transform, reproject
 
+from eoflow.catchment import compute_flow_accumulation
 from eoflow.log_utils import get_logger
 from eoflow.utils import load_shapefile
 
@@ -215,6 +219,175 @@ def _render_png(
         return buf.read()
 
 
+def _read_flow_acc(
+    dem_path: Path,
+    max_pixels: int = 2048,
+) -> tuple[np.ndarray, BoundingBox]:
+    """Compute flow accumulation from *dem_path* and reproject to WGS 84.
+
+    Uses :func:`eoflow.catchment.compute_flow_accumulation` for the
+    hydrological conditioning step, then reprojects the resulting array
+    to Web Mercator (EPSG:3857) via an in-memory rasterio dataset so the
+    same WGS 84 bounds helpers used by :func:`_read_dem` can be reused.
+
+    Parameters
+    ----------
+    dem_path : Path
+        Path to the DEM GeoTIFF.
+    max_pixels : int
+        Maximum pixels on the longest axis before down-sampling (same
+        semantics as in :func:`_read_dem`).
+
+    Returns
+    -------
+    acc_reprojected : numpy.ndarray
+        Float64 array of flow-accumulation values in WGS 84 / Mercator
+        projection.  NaN where nodata.
+    geo_bounds : rasterio.coords.BoundingBox
+        Bounds in WGS 84 (lon_min, lat_min, lon_max, lat_max).
+    """
+    from rasterio.io import MemoryFile
+
+    acc_array, src_transform, src_crs = compute_flow_accumulation(dem_path)
+
+    height, width = acc_array.shape
+
+    # Write the accumulation array into a MemoryFile so we can use rasterio's
+    # reprojection helpers (identical pipeline to _read_dem).
+    with MemoryFile() as mem:
+        with mem.open(
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=np.float32,
+            crs=src_crs,
+            transform=src_transform,
+            nodata=float("nan"),
+        ) as ds:
+            ds.write(acc_array.astype(np.float32), 1)
+
+        with mem.open() as src:
+            dst_crs = "EPSG:3857"
+            transform_3857, w_3857, h_3857 = calculate_default_transform(
+                src.crs, dst_crs, src.width, src.height, *src.bounds
+            )
+            width_3857 = int(cast(int, w_3857))
+            height_3857 = int(cast(int, h_3857))
+
+            longest = max(height_3857, width_3857)
+            if longest > max_pixels:
+                scale = max_pixels / longest
+                width_3857 = max(1, int(width_3857 * scale))
+                height_3857 = max(1, int(height_3857 * scale))
+                transform_3857, w_3857, h_3857 = calculate_default_transform(
+                    src.crs,
+                    dst_crs,
+                    src.width,
+                    src.height,
+                    *src.bounds,
+                    dst_width=width_3857,
+                    dst_height=height_3857,
+                )
+                width_3857 = int(cast(int, w_3857))
+                height_3857 = int(cast(int, h_3857))
+
+            dst_array = np.empty((height_3857, width_3857), dtype=np.float32)
+            reproject(
+                source=rasterio.band(src, 1),
+                destination=dst_array,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform_3857,
+                dst_crs=dst_crs,
+                dst_nodata=float("nan"),
+                resampling=Resampling.bilinear,
+            )
+
+    dst_array = dst_array.astype(np.float64)
+    # Values ≤ 0 are nodata (pysheds nodata_out=0 for integer steps)
+    dst_array[dst_array <= 0] = np.nan
+
+    merc_left = transform_3857.c
+    merc_top = transform_3857.f
+    merc_right = merc_left + width_3857 * transform_3857.a
+    merc_bottom = merc_top + height_3857 * transform_3857.e
+
+    lon_min, lat_min = _MERCATOR_TO_WGS84.transform(merc_left, merc_bottom)
+    lon_max, lat_max = _MERCATOR_TO_WGS84.transform(merc_right, merc_top)
+
+    geo_bounds = BoundingBox(left=lon_min, bottom=lat_min, right=lon_max, top=lat_max)
+    return dst_array, geo_bounds
+
+
+def _render_flow_acc_png(
+    acc: np.ndarray,
+    threshold: int = 10,
+) -> bytes:
+    """Render a flow-accumulation array to a log-scale PNG overlay.
+
+    Only cells whose accumulation value exceeds *threshold* are drawn;
+    everything else is fully transparent so the base map shows through.
+    Rendered with a blue ``cubehelix``-style palette and logarithmic
+    normalisation so both small streams and large rivers are visible.
+
+    Parameters
+    ----------
+    acc : numpy.ndarray
+        2-D float array of flow-accumulation values (NaN = nodata).
+    threshold : int
+        Cells with ``acc <= threshold`` are rendered as transparent.
+
+    Returns
+    -------
+    bytes
+        PNG image bytes (RGBA, with transparency).
+    """
+    # Mask: show only cells above threshold with valid data
+    show_mask = (~np.isnan(acc)) & (acc > threshold)
+
+    if not np.any(show_mask):
+        # Return a 1×1 fully-transparent placeholder
+        fig, ax = plt.subplots(1, 1, figsize=(0.01, 0.01), dpi=1)
+        ax.axis("off")
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+
+    log_acc = np.where(show_mask, np.log10(np.maximum(acc, 1.0)), np.nan)
+    log_min = float(np.nanmin(log_acc))
+    log_max = float(np.nanmax(log_acc))
+
+    norm = mcolors.Normalize(vmin=log_min, vmax=log_max if log_max > log_min else log_min + 1)
+    cmap = plt.get_cmap("Blues")
+
+    # Map to RGBA; fill non-show cells with zeros first to avoid cmap artefacts
+    fill = np.where(np.isnan(log_acc), log_min, log_acc)
+    rgba = cmap(norm(fill))
+
+    # Make non-stream cells fully transparent
+    rgba[~show_mask, 3] = 0.0
+
+    # Boost opacity of high-accumulation cells so major rivers stand out
+    if log_max > log_min:
+        stream_alpha = norm(np.where(show_mask, log_acc, log_min))
+        rgba[show_mask, 3] = np.clip(0.4 + 0.6 * stream_alpha[show_mask], 0.0, 1.0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fig, ax = plt.subplots(1, 1, figsize=(acc.shape[1] / 100, acc.shape[0] / 100), dpi=100)
+        ax.imshow(rgba, aspect="auto")
+        ax.axis("off")
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100, bbox_inches="tight", pad_inches=0, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+
+
 # ---------------------------------------------------------------------------
 # Popup helper
 # ---------------------------------------------------------------------------
@@ -232,6 +405,12 @@ def _build_popup_html(row: pd.Series, value_col: str) -> str:
     lon = row.get("longitude", "")
     status = row.get("delineation_status", "")
 
+    raw_acc = row.get("flow_acc_at_pour_point")
+    if raw_acc is not None and pd.notna(raw_acc):
+        flow_acc_str = f"{int(raw_acc):,} cells"
+    else:
+        flow_acc_str = ""
+
     lines = [
         f"<b>{name}</b>",
         f"Notation: {notation}",
@@ -240,6 +419,7 @@ def _build_popup_html(row: pd.Series, value_col: str) -> str:
         f"Time: {time}",
         f"<b>{value_col}: {value}</b>",
         f"Delineation: {status}",
+        f"Flow accumulation: {flow_acc_str}" if flow_acc_str else "",
         f"Lat: {lat:.5f}, Lon: {lon:.5f}" if isinstance(lat, float) else "",
     ]
     return "<br>".join(line for line in lines if line)
@@ -259,6 +439,9 @@ def visualise(
     *,
     dem_opacity: float = 0.45,
     max_pixels: int = 2048,
+    show_flow_acc: bool = True,
+    flow_acc_threshold: int = 100,
+    flow_acc_opacity: float = 0.7,
 ) -> Path:
     """Build an interactive map and open it in the browser.
 
@@ -268,7 +451,7 @@ def visualise(
         GeoPackage produced by ``dataset_builder.py``.
     dem_path : Path or None
         Devon DEM GeoTIFF. If provided, rendered as a semi-transparent
-        elevation overlay.
+        elevation overlay and used to compute the flow-accumulation layer.
     shapefile_path : Path or None
         Devon county boundary shapefile. If provided, drawn as an
         outline on the map.
@@ -281,6 +464,16 @@ def visualise(
         Opacity of the DEM overlay (0 = invisible, 1 = opaque).
     max_pixels : int
         Maximum pixels on the longest DEM axis before down-sampling.
+    show_flow_acc : bool
+        Whether to compute and display the flow-accumulation overlay.
+        Requires *dem_path* to be set.  Defaults to ``True``.
+    flow_acc_threshold : int
+        Cells with flow accumulation ≤ this value are rendered as
+        transparent (i.e. hillslopes are hidden, streams are shown).
+        Defaults to ``100``.
+    flow_acc_opacity : float
+        Overall opacity of the flow-accumulation layer (0–1).
+        Defaults to ``0.7``.
 
     Returns
     -------
@@ -423,6 +616,55 @@ def visualise(
             logger.warning("Could not render DEM overlay: %s", exc)
 
     # ------------------------------------------------------------------
+    # 4b. Flow-accumulation overlay (optional, derived from same DEM)
+    # ------------------------------------------------------------------
+    if show_flow_acc and dem_path is not None and Path(dem_path).exists():
+        logger.info("Computing flow-accumulation overlay from %s …", dem_path)
+        try:
+            acc_array, acc_bounds = _read_flow_acc(dem_path, max_pixels=max_pixels)
+
+            valid_acc = acc_array[~np.isnan(acc_array)]
+            if valid_acc.size > 0:
+                acc_max = float(np.nanmax(valid_acc))
+                logger.info(
+                    "Flow accumulation range: 1 – %.0f cells  (%d×%d px, threshold=%d)",
+                    acc_max,
+                    acc_array.shape[0],
+                    acc_array.shape[1],
+                    flow_acc_threshold,
+                )
+
+                acc_png_bytes = _render_flow_acc_png(acc_array, threshold=flow_acc_threshold)
+                acc_png_b64 = base64.b64encode(acc_png_bytes).decode("ascii")
+                acc_data_uri = f"data:image/png;base64,{acc_png_b64}"
+
+                acc_img_bounds = [
+                    [acc_bounds.bottom, acc_bounds.left],
+                    [acc_bounds.top, acc_bounds.right],
+                ]
+                folium.raster_layers.ImageOverlay(
+                    image=acc_data_uri,
+                    bounds=acc_img_bounds,
+                    opacity=flow_acc_opacity,
+                    name="Flow Accumulation",
+                    interactive=False,
+                    cross_origin=False,
+                    zindex=2,
+                ).add_to(m)
+
+                # Add a simple legend entry for the flow-accumulation layer
+                acc_cmap = cm.LinearColormap(
+                    colors=["#deebf7", "#9ecae1", "#3182bd", "#08306b"],
+                    vmin=flow_acc_threshold,
+                    vmax=int(acc_max),
+                    caption=f"Flow accumulation (cells, log scale, threshold={flow_acc_threshold})",
+                )
+                acc_cmap.add_to(m)
+                logger.info("Flow-accumulation overlay added (%d KB)", len(acc_png_bytes) // 1024)
+        except Exception as exc:
+            logger.warning("Could not render flow-accumulation overlay: %s", exc)
+
+    # ------------------------------------------------------------------
     # 5. Devon county boundary (optional)
     # ------------------------------------------------------------------
     if shapefile_path is not None and Path(shapefile_path).exists():
@@ -550,7 +792,7 @@ def visualise(
     # 8. Legends and controls
     # ------------------------------------------------------------------
     sample_cmap.add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
 
     # Fit map to catchment + point bounds
     all_lats = plot_gdf["latitude"].tolist()
@@ -566,33 +808,63 @@ def visualise(
     ne = [max(all_lats), max(all_lons)]
     m.fit_bounds([sw, ne], padding=[40, 40])
 
-    # --- DEM opacity slider (if DEM was loaded) ---------------------------
+    # --- Opacity sliders (DEM and flow-accumulation layers) ---------------
     if dem_path is not None and Path(dem_path).exists():
+        show_acc_slider = show_flow_acc
         slider_html = f"""
         <div style="
             position: fixed; bottom: 50px; left: 10px; z-index: 9999;
             background: white; padding: 10px 14px; border-radius: 6px;
             box-shadow: 0 2px 6px rgba(0,0,0,0.3); font-family: sans-serif;
-            font-size: 13px;
+            font-size: 13px; min-width: 200px;
         ">
-            <label for="dem-opacity" style="margin-right: 6px;">DEM opacity</label>
-            <input type="range" id="dem-opacity" min="0" max="100"
-                   value="{int(dem_opacity * 100)}" style="width: 120px; vertical-align: middle;">
-            <span id="dem-opacity-val" style="margin-left: 4px;">{int(dem_opacity * 100)}%</span>
+            <div style="margin-bottom: 6px;">
+                <label for="dem-opacity" style="display:inline-block; width:130px;">DEM opacity</label>
+                <input type="range" id="dem-opacity" min="0" max="100"
+                       value="{
+            int(dem_opacity * 100)
+        }" style="width: 100px; vertical-align: middle;">
+                <span id="dem-opacity-val" style="margin-left: 4px; min-width:32px; display:inline-block;">{
+            int(dem_opacity * 100)
+        }%</span>
+            </div>
+            {
+            ""
+            if not show_acc_slider
+            else f'''
+            <div>
+                <label for="acc-opacity" style="display:inline-block; width:130px;">Flow acc. opacity</label>
+                <input type="range" id="acc-opacity" min="0" max="100"
+                       value="{int(flow_acc_opacity * 100)}" style="width: 100px; vertical-align: middle;">
+                <span id="acc-opacity-val" style="margin-left: 4px; min-width:32px; display:inline-block;">{int(flow_acc_opacity * 100)}%</span>
+            </div>
+            '''
+        }
         </div>
         <script>
         document.addEventListener('DOMContentLoaded', function() {{
-            var slider = document.getElementById('dem-opacity');
-            var label  = document.getElementById('dem-opacity-val');
-            function setOpacity(val) {{
-                var imgs = document.querySelectorAll('.leaflet-image-layer');
-                imgs.forEach(function(img) {{ img.style.opacity = val; }});
+            // DEM slider – targets the FIRST image overlay (z-index 1)
+            var demSlider = document.getElementById('dem-opacity');
+            var demLabel  = document.getElementById('dem-opacity-val');
+            if (demSlider) {{
+                demSlider.addEventListener('input', function() {{
+                    demLabel.textContent = this.value + '%';
+                    var v = this.value / 100;
+                    var imgs = document.querySelectorAll('.leaflet-image-layer');
+                    if (imgs.length > 0) imgs[0].style.opacity = v;
+                }});
             }}
-            slider.addEventListener('input', function() {{
-                var v = this.value / 100;
-                label.textContent = this.value + '%';
-                setOpacity(v);
-            }});
+            // Flow-accumulation slider – targets the SECOND image overlay (z-index 2)
+            var accSlider = document.getElementById('acc-opacity');
+            var accLabel  = document.getElementById('acc-opacity-val');
+            if (accSlider) {{
+                accSlider.addEventListener('input', function() {{
+                    accLabel.textContent = this.value + '%';
+                    var v = this.value / 100;
+                    var imgs = document.querySelectorAll('.leaflet-image-layer');
+                    if (imgs.length > 1) imgs[1].style.opacity = v;
+                }});
+            }}
         }});
         </script>
         """
@@ -615,12 +887,14 @@ def visualise(
         1 for _, r in plot_gdf.iterrows() if r.geometry is not None and not r.geometry.is_empty
     )
     print(f"\nMap saved to {html_path}")
-    print(f"  Sample points : {len(plot_gdf)}")
-    print(f"  Catchments    : {n_catchments}")
+    print(f"  Sample points    : {len(plot_gdf)}")
+    print(f"  Catchments       : {n_catchments}")
     if dem_path:
-        print(f"  DEM overlay   : {dem_path}")
+        print(f"  DEM overlay      : {dem_path}")
+    if show_flow_acc and dem_path:
+        print(f"  Flow acc overlay : threshold={flow_acc_threshold} cells")
     if shapefile_path:
-        print(f"  Boundary      : {shapefile_path}")
+        print(f"  Boundary         : {shapefile_path}")
 
     webbrowser.open(html_path.as_uri())
     return html_path
@@ -681,6 +955,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=2048,
         help="Max pixels on the longest DEM axis before down-sampling.",
     )
+    # Flow-accumulation options
+    flow_acc_group = p.add_mutually_exclusive_group()
+    flow_acc_group.add_argument(
+        "--flow-acc",
+        dest="show_flow_acc",
+        action="store_true",
+        default=True,
+        help="Show the flow-accumulation overlay (default: on).",
+    )
+    flow_acc_group.add_argument(
+        "--no-flow-acc",
+        dest="show_flow_acc",
+        action="store_false",
+        help="Disable the flow-accumulation overlay.",
+    )
+    p.add_argument(
+        "--flow-acc-threshold",
+        type=int,
+        default=100,
+        help=(
+            "Cells with flow accumulation ≤ this value are hidden "
+            "(higher = only show larger streams). Default: 100."
+        ),
+    )
+    p.add_argument(
+        "--flow-acc-opacity",
+        type=float,
+        default=0.7,
+        help="Opacity of the flow-accumulation overlay (0–1). Default: 0.7.",
+    )
     return p.parse_args(argv)
 
 
@@ -712,6 +1016,9 @@ def main(argv: list[str] | None = None) -> None:
             output_html=args.output,
             dem_opacity=args.dem_opacity,
             max_pixels=args.max_pixels,
+            show_flow_acc=args.show_flow_acc,
+            flow_acc_threshold=args.flow_acc_threshold,
+            flow_acc_opacity=args.flow_acc_opacity,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

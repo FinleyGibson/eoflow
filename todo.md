@@ -12,12 +12,12 @@
     - [ ] Combine data sources with source annotation (labelled)
 - [ ] River Graph
     - [x] Generate river graph from maps
-    - [ ] Add Water sample data to graph as nodes
+    - [x] Add Water sample data to graph as nodes
     - [ ] Convert to Directed graph
 - [ ] River Tree
     - [ ] Move to tree data structure
 - [ ] Modelling
-    - [ ] Script to build sample-catchment dataset.
+    - [x] Script to build sample-catchment dataset.
     - [ ] Basic interpolation model
     - [ ] Directed interpolation model
     - [ ] Weighted interpolation model
@@ -77,11 +77,11 @@
 
 - [x] Get SOME EA data using script
 - [x] Script to convert to desired format
-- [ ] Prune EA data to a few examples (3)
+- [ ] Prune EA data to a few examples (10) from within Devon
+- [ ] Prune the Topography data to Devon only
+- [ ] Update tests to use Devon only data.
 - [ ] Run script to get catchments
 - [ ] Check outputs
 - [ ] Visualise outputs
 - [ ] Build output class
 - [ ] port methods to get EO data into class
-
-
