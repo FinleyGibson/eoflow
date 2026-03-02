@@ -209,7 +209,7 @@ def get_devon_dem(
     output_path: Path,
     *,
     shapefile_path: Path = _DEFAULT_SHAPEFILE,
-    dem_type: str = "SRTMGL1",
+    dem_type: str = "COP30",
     pad: float = 0.0,
     api_key: str | None = None,
 ) -> Path:
