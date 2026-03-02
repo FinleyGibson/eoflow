@@ -1,9 +1,12 @@
 from eoflow.config import Config
 from eoflow.log_utils import setup_logging
+from eoflow.samples import CatchmentDataset, CatchmentSample
 from eoflow.utils import PROJECT_ROOT
 
 __all__ = [
     "PROJECT_ROOT",
+    "CatchmentSample",
+    "CatchmentDataset",
 ]
 
 # set up project config
