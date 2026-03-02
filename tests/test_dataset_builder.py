@@ -43,8 +43,8 @@ from scripts.dataset_builder import (
 
 
 def _sample_result(lon: float = -3.53, lat: float = 50.72, size: float = 0.1):
-    """Return a (Polygon, Point) tuple matching ``_delineate_catchment_core``."""
-    return (_sample_polygon(lon, lat, size), Point(lon, lat))
+    """Return a (Polygon, Point, float) tuple matching ``_delineate_catchment_core``."""
+    return (_sample_polygon(lon, lat, size), Point(lon, lat), 250.0)
 
 
 def _sample_polygon(lon: float = -3.53, lat: float = 50.72, size: float = 0.1) -> Polygon:
@@ -337,7 +337,7 @@ class TestBuildDataset:
         df.to_csv(csv, index=False)
 
         poly = _sample_polygon(-3.53, 50.72)
-        mock_delineate.return_value = (poly, Point(-3.53, 50.72))
+        mock_delineate.return_value = (poly, Point(-3.53, 50.72), 250.0)
 
         gdf = build_dataset(
             csv_path=csv,

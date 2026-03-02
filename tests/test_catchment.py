@@ -888,11 +888,12 @@ class TestDelineateCatchmentWithMetadata:
         # Should accept **kwargs for passing to main function
         assert any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
-    @patch("eoflow.catchment.delineate_catchment")
-    def test_metadata_structure(self, mock_delineate, sample_point, sample_polygon):
+    @patch("eoflow.catchment._delineate_catchment_core")
+    def test_metadata_structure(self, mock_core, sample_point, sample_polygon):
         """Test that metadata function returns correct structure."""
-        # Mock the delineate_catchment to return a polygon
-        mock_delineate.return_value = sample_polygon
+        snapped_point = Point(-3.51, 50.71)
+        flow_acc_value = 512.0
+        mock_core.return_value = (sample_polygon, snapped_point, flow_acc_value)
 
         result = delineate_catchment_with_metadata(point=sample_point, dem_path="dummy.tif")
 
@@ -905,6 +906,8 @@ class TestDelineateCatchmentWithMetadata:
         assert "centroid" in result
         assert "bounds" in result
         assert "pour_point" in result
+        assert "snapped_pour_point" in result
+        assert "flow_acc_at_pour_point" in result
 
         # Check types
         assert isinstance(result["polygon"], Polygon)
@@ -918,11 +921,13 @@ class TestDelineateCatchmentWithMetadata:
         assert result["centroid"] == sample_polygon.centroid
         assert result["bounds"] == sample_polygon.bounds
         assert result["pour_point"] == sample_point
+        assert result["snapped_pour_point"] == snapped_point
+        assert result["flow_acc_at_pour_point"] == flow_acc_value
 
-    @patch("eoflow.catchment.delineate_catchment")
-    def test_metadata_kwargs_passed_through(self, mock_delineate, sample_point, sample_polygon):
-        """Test that kwargs are passed to delineate_catchment."""
-        mock_delineate.return_value = sample_polygon
+    @patch("eoflow.catchment._delineate_catchment_core")
+    def test_metadata_kwargs_passed_through(self, mock_core, sample_point, sample_polygon):
+        """Test that kwargs are passed to _delineate_catchment_core."""
+        mock_core.return_value = (sample_polygon, Point(-3.51, 50.71), 250.0)
 
         custom_kwargs = {
             "flow_acc_threshold": 5000,
@@ -932,9 +937,9 @@ class TestDelineateCatchmentWithMetadata:
 
         delineate_catchment_with_metadata(point=sample_point, dem_path="dummy.tif", **custom_kwargs)
 
-        # Verify delineate_catchment was called with the kwargs
-        mock_delineate.assert_called_once()
-        call_kwargs = mock_delineate.call_args[1]
+        # Verify _delineate_catchment_core was called with the kwargs
+        mock_core.assert_called_once()
+        call_kwargs = mock_core.call_args[1]
         assert call_kwargs["flow_acc_threshold"] == 5000
         assert call_kwargs["pit_fill"] is False
         assert call_kwargs["routing"] == "d8"
