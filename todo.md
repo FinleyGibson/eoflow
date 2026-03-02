@@ -40,8 +40,8 @@
 ## For next week
 
 - **Focus initial work on Environment Agency (EA) data**
-    - [ ] Compile and structure the EA dataset.
-    - [ ] Begin feature extraction from this dataset.
+    - [x] Compile and structure the EA dataset.
+    - [x] Begin feature extraction from this dataset.
 
 - **Prepare model inputs**
     - [ ] Normalise variables by:
@@ -77,11 +77,16 @@
 
 - [x] Get SOME EA data using script
 - [x] Script to convert to desired format
-- [ ] Prune EA data to a few examples (10) from within Devon
-- [ ] Prune the Topography data to Devon only
-- [ ] Update tests to use Devon only data.
-- [ ] Run script to get catchments
-- [ ] Check outputs
-- [ ] Visualise outputs
-- [ ] Build output class
-- [ ] port methods to get EO data into class
+- [x] Prune EA data to a few examples (10) from within Devon
+- [x] Prune the Topography data to Devon only
+- [x] Update tests to use Devon only data.
+- [x] Run script to get catchments
+- [x] Check outputs
+- [x] Visualise outputs
+- [x] Build output class
+- [x] port methods to get EO data into class
+- [ ] Calculate catchment area
+- [ ] Modify Albert's scripts to get rainfall data
+- [ ] Incorporate soil type classification:
+    - [ ] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
+    - [ ] Calculate fractional coverage of the 26 soil types per catchment.
