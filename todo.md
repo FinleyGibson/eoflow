@@ -85,8 +85,17 @@
 - [x] Visualise outputs
 - [x] Build output class
 - [x] port methods to get EO data into class
-- [ ] Calculate catchment area
+- [x] Calculate catchment area
+
+- [ ] Fix Watershed delineation
+    - [ ] Use pygis
+        - Get the method from Albert's teams message.
 - [ ] Modify Albert's scripts to get rainfall data
+    - [ ] Fix aws command line tool on my local machine
+    - [ ] Run in command line.
+    - [ ] Run from python.
+    - [ ] Add method to Sample class.
 - [ ] Incorporate soil type classification:
+    - leave this until the model pipeline is working.
     - [ ] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
     - [ ] Calculate fractional coverage of the 26 soil types per catchment.
