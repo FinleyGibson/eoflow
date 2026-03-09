@@ -24,12 +24,11 @@ Author: Adapted from R code by Francis Rowney
 Last Updated: 2025
 """
 
-import json
 import time
 import warnings
 from datetime import datetime, timedelta
 from io import StringIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import requests
@@ -65,20 +64,10 @@ class EAWaterQualityAPI:
         """
         config = get_config()
 
-        self.delay = (
-            delay if delay is not None else config.get("api.ea_api_delay")
-        )
-        self.timeout = (
-            timeout if timeout is not None else config.get("api.ea_api_timeout")
-        )
-        self.base_url = (
-            base_url if base_url is not None else config.get("api.ea_base_url")
-        )
-        self.max_limit = (
-            max_limit
-            if max_limit is not None
-            else config.get("api.ea_max_limit")
-        )
+        self.delay = delay if delay is not None else config.get("api.ea_api_delay")
+        self.timeout = timeout if timeout is not None else config.get("api.ea_api_timeout")
+        self.base_url = base_url if base_url is not None else config.get("api.ea_base_url")
+        self.max_limit = max_limit if max_limit is not None else config.get("api.ea_max_limit")
 
         self.session = requests.Session()
 
@@ -172,9 +161,7 @@ class EAWaterQualityAPI:
             )
 
             # Log response details for debugging
-            logger.debug(
-                f"Response status: {response.status_code}, URL: {response.url}"
-            )
+            logger.debug(f"Response status: {response.status_code}, URL: {response.url}")
 
             response.raise_for_status()
 
@@ -198,20 +185,12 @@ class EAWaterQualityAPI:
                     f"Check logs for details."
                 )
             else:
-                logger.error(
-                    f"HTTP error for {date_from} to {date_to}: {str(e)}"
-                )
-                warnings.warn(
-                    f"HTTP error for {date_from} to {date_to}: {str(e)}"
-                )
+                logger.error(f"HTTP error for {date_from} to {date_to}: {str(e)}")
+                warnings.warn(f"HTTP error for {date_from} to {date_to}: {str(e)}")
             return None
         except requests.exceptions.RequestException as e:
-            logger.error(
-                f"Request failed for {date_from} to {date_to}: {str(e)}"
-            )
-            warnings.warn(
-                f"Request failed for {date_from} to {date_to}: {str(e)}"
-            )
+            logger.error(f"Request failed for {date_from} to {date_to}: {str(e)}")
+            warnings.warn(f"Request failed for {date_from} to {date_to}: {str(e)}")
             return None
 
     def get_data(
@@ -340,9 +319,7 @@ class EAWaterQualityAPI:
 
         for det_code, column_name in determinands.items():
             if verbose:
-                logger.info(
-                    f"=== Fetching determinand {det_code}: {column_name} ==="
-                )
+                logger.info(f"=== Fetching determinand {det_code}: {column_name} ===")
 
             df = self.get_data(
                 determinand=det_code,
@@ -388,8 +365,12 @@ class EAWaterQualityAPI:
                 common_cols = list(set(result.columns) & set(df.columns))
 
                 # Filter to essential columns for merging (exclude result columns)
-                merge_cols = [col for col in common_cols if col not in
-                             ["result", "Temp Water", "Cond @ 25C", "Orthophospht", "TurbidityNTU"]]
+                merge_cols = [
+                    col
+                    for col in common_cols
+                    if col
+                    not in ["result", "Temp Water", "Cond @ 25C", "Orthophospht", "TurbidityNTU"]
+                ]
 
                 if merge_cols:
                     result = result.merge(df, on=merge_cols, how="outer")
@@ -404,10 +385,10 @@ class EAWaterQualityAPI:
         self,
         df: pd.DataFrame,
         polygon: List[Tuple[float, float]],
-        lat_col: str = None,
-        lon_col: str = None,
-        easting_col: str = None,
-        northing_col: str = None,
+        lat_col: str | None = None,
+        lon_col: str | None = None,
+        easting_col: str | None = None,
+        northing_col: str | None = None,
     ) -> pd.DataFrame:
         """
         Filter observations by a geographic polygon.
@@ -434,7 +415,8 @@ class EAWaterQualityAPI:
             ValueError: If coordinate columns cannot be found or invalid data type
         """
         try:
-            from shapely.geometry import Point, Polygon as ShapelyPolygon
+            from shapely.geometry import Point
+            from shapely.geometry import Polygon as ShapelyPolygon
         except ImportError:
             raise ImportError("shapely is required for polygon filtering")
 
@@ -449,8 +431,8 @@ class EAWaterQualityAPI:
         # Auto-detect coordinate columns if not provided
         if lat_col is None or lon_col is None:
             # Try to find lat/lon columns
-            lat_candidates = [c for c in df.columns if 'latitude' in c.lower()]
-            lon_candidates = [c for c in df.columns if 'longitude' in c.lower()]
+            lat_candidates = [c for c in df.columns if "latitude" in c.lower()]
+            lon_candidates = [c for c in df.columns if "longitude" in c.lower()]
 
             if lat_candidates and lon_candidates:
                 lat_col = lat_candidates[0]
@@ -458,13 +440,15 @@ class EAWaterQualityAPI:
                 logger.info(f"Auto-detected lat/lon columns: {lat_col}, {lon_col}")
             else:
                 # Try to find easting/northing columns
-                easting_candidates = [c for c in df.columns if 'easting' in c.lower()]
-                northing_candidates = [c for c in df.columns if 'northing' in c.lower()]
+                easting_candidates = [c for c in df.columns if "easting" in c.lower()]
+                northing_candidates = [c for c in df.columns if "northing" in c.lower()]
 
                 if easting_candidates and northing_candidates:
                     easting_col = easting_candidates[0]
                     northing_col = northing_candidates[0]
-                    logger.info(f"Auto-detected easting/northing columns: {easting_col}, {northing_col}")
+                    logger.info(
+                        f"Auto-detected easting/northing columns: {easting_col}, {northing_col}"
+                    )
                 else:
                     raise ValueError(
                         "Could not auto-detect coordinate columns. "
@@ -530,10 +514,8 @@ class EAWaterQualityAPI:
         mask = df_copy.apply(point_in_polygon, axis=1)
         filtered_df = df[mask]
 
-        logger.info(
-            f"Filtered {len(df)} observations to {len(filtered_df)} within polygon"
-        )
-        return filtered_df
+        logger.info(f"Filtered {len(df)} observations to {len(filtered_df)} within polygon")
+        return pd.DataFrame(filtered_df)
 
 
 # Convenience function for simple use cases
@@ -590,10 +572,9 @@ def get_ea_water_quality(
 # Example usage
 if __name__ == "__main__":
     import logging
-    from pathlib import Path
 
     # create test logger
-    logger = logging.getLogger(f"src{__file__.split("src")[-1]}: {__name__}")
+    logger = logging.getLogger(f"src{__file__.split('src')[-1]}: {__name__}")
     logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
     handler.setLevel(logging.DEBUG)
@@ -656,7 +637,6 @@ if __name__ == "__main__":
         area="environment_agency,DCS",
         timeout=120,
     )
-
 
     logger.info(f"Retrieved {len(df)} observations using convenience function")
     if not df.empty:
