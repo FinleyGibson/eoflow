@@ -20,9 +20,10 @@ def _delineate_catchment_core(
     nodata_out: Optional[float] = None,
     pit_fill: bool = True,
     pit_fill_epsilon: float = 0.0001,
+    fill_depressions: bool = True,
     resolve_flats: bool = True,
     routing: str = "d8",
-    flow_acc_threshold: int = 1000,
+    flow_acc_threshold: int = 5000,
 ) -> Tuple[Polygon, Point, float]:
     """
     Core catchment delineation returning polygon, snapped pour point, and flow accumulation.
@@ -77,27 +78,31 @@ def _delineate_catchment_core(
     # Under NumPy 2.x (NEP 50) float → int is *never* a safe cast, so
     # steps that produce integer arrays (flowdir, accumulation, catchment)
     # need an explicit integer nodata_out.
-    _dem_nodata = getattr(dem, "nodata", None)
-    if _dem_nodata is not None and np.issubdtype(np.array(_dem_nodata).dtype, np.floating):
-        _int_nodata_out = {"nodata_out": np.int64(0)}
-        logger.debug(
-            "DEM nodata is float (%s) – using nodata_out=0 for integer steps",
-            _dem_nodata,
-        )
-    else:
-        _int_nodata_out = {}
+    # After fill_pits the DEM is upcast to float64; pysheds propagates that
+    # float nodata into every downstream Raster.  Under NumPy 2.x (NEP 50),
+    # np.can_cast raises TypeError for Python scalars, and a float nodata
+    # cannot be safely cast into integer (flowdir/accumulation) or boolean
+    # (catchment) arrays.  We always supply explicit NumPy scalar nodata_out
+    # values to avoid the TypeError regardless of the source DEM dtype.
+    _int_nodata_out = {"nodata_out": np.int64(0)}  # for flowdir & accumulation
+    _bool_nodata_out = {"nodata_out": np.bool_(False)}  # for catchment
+    logger.debug("Using nodata_out=int64(0) for integer steps, bool_(False) for catchment")
 
     # Step 1: Fill pits in DEM
     if pit_fill:
         pit_filled_dem = grid.fill_pits(dem, **_nodata_in_kw, **_nodata_out_kw)
 
-        # Step 2: Resolve flats
-        if resolve_flats:
-            inflated_dem = grid.resolve_flats(
-                pit_filled_dem, eps=pit_fill_epsilon, **_nodata_out_kw
-            )
+        # Step 2: Fill depressions (multi-cell sinks larger than single pits)
+        if fill_depressions:
+            flooded_dem = grid.fill_depressions(pit_filled_dem)
         else:
-            inflated_dem = pit_filled_dem
+            flooded_dem = pit_filled_dem
+
+        # Step 3: Resolve flats
+        if resolve_flats:
+            inflated_dem = grid.resolve_flats(flooded_dem, eps=pit_fill_epsilon, **_nodata_out_kw)
+        else:
+            inflated_dem = flooded_dem
     else:
         inflated_dem = dem
 
@@ -151,6 +156,8 @@ def _delineate_catchment_core(
         logger.debug("Could not read flow-accumulation at pour point; storing nan")
 
     # Step 6: Delineate the catchment
+    # catchment() produces a boolean raster; use np.bool_(False) as nodata_out
+    # so that pysheds' NEP-50-aware can_cast check succeeds.
     try:
         catch = grid.catchment(
             x=x_snap,
@@ -159,7 +166,7 @@ def _delineate_catchment_core(
             dirmap=dirmap,
             routing=routing,
             xytype="coordinate",
-            **_int_nodata_out,
+            **_bool_nodata_out,
         )
     except Exception as e:
         raise ValueError(f"Failed to delineate catchment: {e}")
@@ -201,9 +208,10 @@ def delineate_catchment(
     nodata_out: Optional[float] = None,
     pit_fill: bool = True,
     pit_fill_epsilon: float = 0.0001,
+    fill_depressions: bool = True,
     resolve_flats: bool = True,
     routing: str = "d8",
-    flow_acc_threshold: int = 1000,
+    flow_acc_threshold: int = 5000,
 ) -> Polygon:
     """
     Delineate a catchment area for a given point using a Digital Elevation Model (DEM).
@@ -211,11 +219,13 @@ def delineate_catchment(
     This function uses the pysheds library to perform watershed delineation based on
     terrain analysis. The workflow includes:
     1. Loading the DEM raster
-    2. Filling pits and resolving flats
-    3. Computing flow direction
-    4. Computing flow accumulation
-    5. Snapping the pour point to the nearest high-accumulation cell
-    6. Delineating the catchment
+    2. Filling pits
+    3. Filling depressions (multi-cell sinks)
+    4. Resolving flats
+    5. Computing flow direction
+    6. Computing flow accumulation
+    7. Snapping the pour point to the nearest high-accumulation cell
+    8. Delineating the catchment
 
     Args:
         point: A Shapely Point representing the pour point (outlet) in the catchment.
@@ -226,11 +236,13 @@ def delineate_catchment(
         apply_input_mask: Whether to apply the DEM's nodata mask to operations.
         nodata_in: Value representing nodata in the input DEM. If None, will use
                    the raster's nodata value.
-        nodata_out: Value to use for nodata in output arrays. If None, pysheds
-                    manages nodata per step automatically (recommended to avoid
-                    dtype conflicts with NumPy 2.x).
+        nodata_out: Value to use for nodata in output arrays. If None, the
+                    function uses NumPy-scalar nodata values internally to
+                    avoid dtype conflicts under NumPy 2.x (NEP 50).
         pit_fill: Whether to fill pits in the DEM before flow analysis.
         pit_fill_epsilon: Small value to add when filling pits to ensure drainage.
+        fill_depressions: Whether to fill multi-cell depressions after pit
+                          filling.  Recommended: True (default).
         resolve_flats: Whether to resolve flat areas in the DEM.
         routing: Flow routing algorithm ('d8' or 'dinf'). Default is 'd8'.
         flow_acc_threshold: Threshold for snapping pour point to stream network.
@@ -263,6 +275,7 @@ def delineate_catchment(
         nodata_out=nodata_out,
         pit_fill=pit_fill,
         pit_fill_epsilon=pit_fill_epsilon,
+        fill_depressions=fill_depressions,
         resolve_flats=resolve_flats,
         routing=routing,
         flow_acc_threshold=flow_acc_threshold,
@@ -328,6 +341,7 @@ def compute_flow_accumulation(
     routing: str = "d8",
     pit_fill: bool = True,
     pit_fill_epsilon: float = 0.0001,
+    fill_depressions: bool = True,
     resolve_flats: bool = True,
     apply_input_mask: bool = False,
 ) -> Tuple[np.ndarray, Any, Any]:
@@ -388,19 +402,19 @@ def compute_flow_accumulation(
     grid = Grid.from_raster(str(dem_path))
     dem = grid.read_raster(str(dem_path))
 
-    _dem_nodata = getattr(dem, "nodata", None)
-    if _dem_nodata is not None and np.issubdtype(np.array(_dem_nodata).dtype, np.floating):
-        _int_nodata_out: dict = {"nodata_out": np.int64(0)}
-        logger.debug("DEM nodata is float (%s) – using nodata_out=0 for integer steps", _dem_nodata)
-    else:
-        _int_nodata_out = {}
+    # Always use explicit NumPy scalar nodata_out to avoid NEP-50 TypeError.
+    _int_nodata_out: dict = {"nodata_out": np.int64(0)}
 
     if pit_fill:
         pit_filled_dem = grid.fill_pits(dem)
-        if resolve_flats:
-            inflated_dem = grid.resolve_flats(pit_filled_dem, eps=pit_fill_epsilon)
+        if fill_depressions:
+            flooded_dem = grid.fill_depressions(pit_filled_dem)
         else:
-            inflated_dem = pit_filled_dem
+            flooded_dem = pit_filled_dem
+        if resolve_flats:
+            inflated_dem = grid.resolve_flats(flooded_dem, eps=pit_fill_epsilon)
+        else:
+            inflated_dem = flooded_dem
     else:
         inflated_dem = dem
 
@@ -419,9 +433,7 @@ def compute_flow_accumulation(
     # Convert to float64 and mask nodata (0 when _int_nodata_out was used,
     # otherwise the raster nodata – accumulation is always ≥ 1 for valid cells).
     acc_array = np.array(acc, dtype=np.float64)
-    nodata_val = 0 if _int_nodata_out else getattr(acc, "nodata", None)
-    if nodata_val is not None:
-        acc_array[acc_array == nodata_val] = np.nan
+    acc_array[acc_array == 0] = np.nan
 
     transform = acc.affine
     logger.info(

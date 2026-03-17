@@ -23,6 +23,7 @@ from eoflow.catchment import delineate_catchment, delineate_catchment_with_metad
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 _CSV_PATH = _DATA_DIR / "ea_water_quality_clean_pruned.csv"
 _DEM_PATH = _DATA_DIR / "uk_dem.geotiff"
+_DEVON_DEM_PATH = _DATA_DIR / "devon_dem.tif"
 
 
 @pytest.fixture
@@ -40,6 +41,29 @@ def mock_dem_path():
 def sample_point():
     """Create a sample pour point for testing."""
     return Point(-3.5, 50.7)
+
+
+@pytest.fixture
+def sample_downstream_points():
+    """Three pour points on the River Exe (Devon), each one downstream of the next.
+
+    These coordinates were validated against ``data/devon_dem.tif`` using
+    ``flow_acc_threshold=5000``.  After snapping to the stream network the
+    flow-accumulation values and delineated catchment areas increase
+    monotonically from upstream to downstream:
+
+    * upstream   – Thorverton reach   acc ≈  448 k  area ≈ 0.035 sq-deg
+    * middle     – mid-Exe reach      acc ≈  915 k  area ≈ 0.071 sq-deg
+    * downstream – Exeter reach       acc ≈ 1390 k  area ≈ 0.107 sq-deg
+
+    The ``downstream`` catchment fully contains both ``middle`` and
+    ``upstream`` catchments; ``middle`` fully contains ``upstream``.
+    """
+    return {
+        "upstream": Point(-3.507, 50.814),  # Thorverton area
+        "middle": Point(-3.509, 50.760),  # mid-Exe
+        "downstream": Point(-3.511, 50.704),  # Exeter area
+    }
 
 
 @pytest.fixture
@@ -189,7 +213,7 @@ class TestDelineateCatchmentParameters:
 
         # Check default values
         assert params["dirmap"].default == (64, 128, 1, 2, 4, 8, 16, 32)
-        assert params["flow_acc_threshold"].default == 1000
+        assert params["flow_acc_threshold"].default == 5000
         assert params["routing"].default == "d8"
         assert params["pit_fill"].default is True
         assert params["resolve_flats"].default is True
@@ -730,14 +754,16 @@ class TestDelineateCatchmentWorkflow:
         custom_nodata = -1
         delineate_catchment(point=sample_point, dem_path=mock_dem_path, nodata_out=custom_nodata)
 
-        # nodata_out is forwarded to fill_pits and resolve_flats
+        # nodata_out is forwarded to fill_pits and resolve_flats (caller value)
         assert mock_grid.fill_pits.call_args[1]["nodata_out"] == custom_nodata
         assert mock_grid.resolve_flats.call_args[1]["nodata_out"] == custom_nodata
-        # flowdir, accumulation, and catchment rely on pysheds defaults
-        # to avoid dtype conflicts (e.g. float nodata on uint8 fdir array)
-        assert "nodata_out" not in mock_grid.flowdir.call_args[1]
-        assert "nodata_out" not in mock_grid.accumulation.call_args[1]
-        assert "nodata_out" not in mock_grid.catchment.call_args[1]
+        # flowdir and accumulation always receive np.int64(0) as nodata_out to
+        # avoid dtype conflicts under NumPy 2.x (NEP 50): float nodata cannot
+        # be safely cast into integer arrays.
+        assert mock_grid.flowdir.call_args[1]["nodata_out"] == np.int64(0)
+        assert mock_grid.accumulation.call_args[1]["nodata_out"] == np.int64(0)
+        # catchment always receives np.bool_(False) for the same reason.
+        assert mock_grid.catchment.call_args[1]["nodata_out"] == np.bool_(False)
 
     @patch("eoflow.catchment.Grid")
     @patch("eoflow.catchment.shape")
@@ -867,6 +893,72 @@ class TestDelineateCatchmentWorkflow:
         assert result.is_valid
         assert not result.is_empty
         assert result.area > 0
+
+
+@pytest.mark.integration
+class TestDelineateCatchmentBehaviour:
+    """Test the delineate_catchment function behaves as expected on select examples.
+
+    These are integration tests that require ``data/devon_dem.tif`` to be
+    present.  Run them with::
+
+        pytest -m integration -k TestDelineateCatchmentBehaviour
+    """
+
+    @pytest.fixture(autouse=True)
+    def _require_devon_dem(self):
+        """Skip the entire class when the Devon DEM is missing."""
+        if not _DEVON_DEM_PATH.exists():
+            pytest.skip(f"Devon DEM not found: {_DEVON_DEM_PATH}")
+
+    def test_upstream_subsumed(self, sample_downstream_points):
+        """Catchments of downstream points must fully subsume upstream catchments.
+
+        For three points on the same river stem (upstream → middle → downstream)
+        the delineated catchment polygons must satisfy:
+
+            downstream ⊇ middle ⊇ upstream
+
+        A tiny spatial buffer (1e-5 degrees, ≈ 1 m) is applied to the
+        containing polygon before the ``contains`` check to absorb
+        sub-pixel rounding at shared boundary edges produced by the
+        raster-to-polygon conversion.
+        """
+        # Delineate catchments for all three points.
+        polys = {}
+        for name, point in sample_downstream_points.items():
+            polys[name] = delineate_catchment(
+                point,
+                _DEVON_DEM_PATH,
+                flow_acc_threshold=5000,
+            )
+
+        upstream_poly = polys["upstream"]
+        middle_poly = polys["middle"]
+        downstream_poly = polys["downstream"]
+
+        # Sanity-check: areas must increase from upstream to downstream.
+        assert upstream_poly.area < middle_poly.area, (
+            f"Expected upstream area ({upstream_poly.area:.6f}) < "
+            f"middle area ({middle_poly.area:.6f})"
+        )
+        assert middle_poly.area < downstream_poly.area, (
+            f"Expected middle area ({middle_poly.area:.6f}) < "
+            f"downstream area ({downstream_poly.area:.6f})"
+        )
+
+        # A small buffer absorbs rounding at shared raster-cell edges.
+        tol = 1e-5  # degrees — roughly 1 m at UK latitudes
+
+        assert downstream_poly.buffer(tol).contains(middle_poly), (
+            "downstream catchment does not subsume middle catchment"
+        )
+        assert downstream_poly.buffer(tol).contains(upstream_poly), (
+            "downstream catchment does not subsume upstream catchment"
+        )
+        assert middle_poly.buffer(tol).contains(upstream_poly), (
+            "middle catchment does not subsume upstream catchment"
+        )
 
 
 class TestDelineateCatchmentWithMetadata:

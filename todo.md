@@ -88,6 +88,10 @@
 - [x] Calculate catchment area
 
 - [ ] Fix Watershed delineation
+    - [ ] Write test demonstrating issue.
+        - [ ] Pick two points, one downstream of another
+        - [ ] Test to check
+            - One catchment subsumes another
     - [ ] Use pygis
         - Get the method from Albert's teams message.
 - [ ] Modify Albert's scripts to get rainfall data
