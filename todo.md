@@ -87,19 +87,33 @@
 - [x] port methods to get EO data into class
 - [x] Calculate catchment area
 
-- [ ] Fix Watershed delineation
-    - [ ] Write test demonstrating issue.
-        - [ ] Pick two points, one downstream of another
-        - [ ] Test to check
+- [x] Fix Watershed delineation
+    - [x] Write test demonstrating issue.
+        - [x] Pick two points, one downstream of another
+        - [x] Test to check
             - One catchment subsumes another
-    - [ ] Use pygis
-        - Get the method from Albert's teams message.
-- [ ] Modify Albert's scripts to get rainfall data
-    - [ ] Fix aws command line tool on my local machine
-    - [ ] Run in command line.
-    - [ ] Run from python.
+    - [ ] ~~Use pygis~~
+- [x] Modify Albert's scripts to get rainfall data
+    - [x] Fix aws command line tool on my local machine
+    - [x] Run in command line.
+    - [x] Run from python.
     - [ ] Add method to Sample class.
 - [ ] Incorporate soil type classification:
     - leave this until the model pipeline is working.
-    - [ ] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
-    - [ ] Calculate fractional coverage of the 26 soil types per catchment.
+    - [x] Check meeting chat for soil data source.
+    - [x] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
+        - Download once for offline access
+    - [x] Calculate fractional coverage of the 26 soil types per catchment.
+    - [ ] Option to use only polygon intersection
+    - [ ] Add new map to visualise internal polygons.
+- [ ] Include MET office high-dimensional rainfall data
+    - [ ] Move from script to library
+        - Query by shape
+    - [ ] Make notebook demo of rainfall
+- [ ] Combine all components into Datapoint Class
+    - Topography
+    - Slope
+    - Soil
+    - EO
+    - Rainfall
+    -
