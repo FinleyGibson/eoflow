@@ -42,6 +42,11 @@ This matches the naming convention used by ``trigger-aws.py`` so the
 from __future__ import annotations
 
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import xarray
+
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -841,6 +846,365 @@ def convert_rainfall(
     logger.info("  Errors    : %d", results["error"])
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Polygon API
+# ---------------------------------------------------------------------------
+
+
+def _polygon_to_bng(polygon):
+    """Reproject a WGS-84 Shapely Polygon or MultiPolygon to British National Grid (EPSG:27700).
+
+    Parameters
+    ----------
+    polygon :
+        Input geometry in WGS 84 (EPSG:4326).
+
+    Returns
+    -------
+    shapely.geometry.Polygon or MultiPolygon
+        The reprojected geometry in EPSG:27700 (coordinates in BNG metres).
+    """
+    from pyproj import Transformer
+    from shapely.ops import transform as shapely_transform
+
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+    return shapely_transform(transformer.transform, polygon)
+
+
+def _load_cube_for_polygon(
+    nc_path: Path,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    res: int,
+) -> np.ndarray:
+    """Load a single rainfall NetCDF and reproject onto a BNG target grid.
+
+    The rainfall rate is converted from m/s to mm/h (× 3 600 000).  Any
+    fill/mask values introduced by the regridding step are replaced with
+    ``NaN``.
+
+    Parameters
+    ----------
+    nc_path :
+        Source NetCDF file.
+    x_min, x_max :
+        Easting extent in BNG metres (EPSG:27700).
+    y_min, y_max :
+        Northing extent in BNG metres (EPSG:27700).
+    res :
+        Output pixel size in metres.
+
+    Returns
+    -------
+    numpy.ndarray
+        Float32 array of shape ``(len(northings), len(eastings))`` in mm/h,
+        with ``NaN`` where the regridder could not interpolate.
+    """
+    iris.FUTURE.save_split_attrs = True
+
+    cube = iris.load_cube(str(nc_path))
+    cube.data = cube.data * 3_600_000  # m/s -> mm/h
+
+    eastings = np.arange(x_min, x_max, res, dtype=np.float64)
+    northings = np.arange(y_min, y_max, res, dtype=np.float64)
+
+    bng_cs = iris.coord_systems.OSGB()
+    x_coord = iris.coords.DimCoord(
+        eastings,
+        standard_name="projection_x_coordinate",
+        units="m",
+        coord_system=bng_cs,
+    )
+    y_coord = iris.coords.DimCoord(
+        northings,
+        standard_name="projection_y_coordinate",
+        units="m",
+        coord_system=bng_cs,
+    )
+    target_cube = iris.cube.Cube(
+        np.zeros((len(northings), len(eastings)), np.float32),
+        dim_coords_and_dims=[(y_coord, 0), (x_coord, 1)],
+    )
+
+    bng_cube = cube.regrid(target_cube, iris.analysis.Linear())
+
+    # Collapse any masked array to a plain float32 ndarray, filling with NaN.
+    raw = bng_cube.data
+    if hasattr(raw, "filled"):
+        data = raw.filled(np.nan).astype(np.float32)
+    else:
+        data = np.asarray(raw, dtype=np.float32)
+
+    return data
+
+
+def get_rainfall_for_polygon(
+    polygon,
+    start: str | datetime,
+    end: str | datetime,
+    *,
+    download_dir: Path | str | None = None,
+    res: int = DEFAULT_RESOLUTION_M,
+    run_hour: int | None = None,
+    workers: int = 4,
+) -> "xarray.DataArray":
+    """Get rainfall rate data clipped to a polygon for a given time range.
+
+    Downloads UKV 2 km rainfall-rate NetCDF files from the Met Office AWS S3
+    bucket for the requested period, reprojects each file from the native
+    Lambert Azimuthal Equal Area grid onto a British National Grid
+    (EPSG:27700) regular grid bounded by the polygon's extent, then masks
+    all grid cells whose centre lies **outside** the polygon to ``NaN``.
+
+    Parameters
+    ----------
+    polygon :
+        Area of interest in **WGS 84 (EPSG:4326)**.  May be a
+        ``shapely.geometry.Polygon`` or ``MultiPolygon`` — for example, a
+        catchment boundary returned by
+        :func:`eoflow.catchment.delineate_catchment`.
+    start :
+        Start of the valid-time range (UTC, inclusive).  Either a
+        ``YYYY-MM-DDTHH:MM`` string or an aware :class:`~datetime.datetime`.
+    end :
+        End of the valid-time range (UTC, inclusive).  Same format as *start*.
+    download_dir :
+        Directory in which to store downloaded ``*.nc`` files.  If ``None``
+        a temporary directory is created and removed automatically once the
+        data has been loaded into memory.  Pass an explicit directory to
+        cache downloads across repeated calls.
+    res :
+        Output grid resolution in BNG metres
+        (default: :data:`DEFAULT_RESOLUTION_M`).
+    run_hour :
+        If set, restrict to files from the model run starting at this UTC
+        hour (0–23).  See :func:`download_rainfall` for details.
+    workers :
+        Number of parallel download threads.
+
+    Returns
+    -------
+    xarray.DataArray
+        Rainfall rate in **mm/h** with dimensions ``(time, y, x)``:
+
+        - ``time``  – UTC :class:`~datetime.datetime` of each valid timestep.
+        - ``y``     – BNG northings (metres, EPSG:27700), south-to-north.
+        - ``x``     – BNG eastings (metres, EPSG:27700), west-to-east.
+
+        Grid cells whose centre lies **outside** *polygon* are ``NaN``.
+
+        ``attrs`` on the returned array:
+
+        - ``units``      ``"mm/h"``
+        - ``long_name``  ``"Rainfall rate"``
+        - ``crs``        ``"EPSG:27700"``
+        - ``source``     ``"Met Office UKV 2km deterministic model"``
+
+        Returns an **empty** DataArray (shape ``(0, 0, 0)``) when no files
+        are available for the requested period or all conversions fail.
+
+    Raises
+    ------
+    ValueError
+        If *end* is before *start*, or if the reprojected polygon has zero
+        area.
+
+    Examples
+    --------
+    ::
+
+        from shapely.geometry import box
+        from eoflow.rainfall import get_rainfall_for_polygon
+
+        # Small bounding box over Devon
+        devon = box(-3.6, 50.6, -3.4, 50.8)
+        da = get_rainfall_for_polygon(
+            devon,
+            start="2024-03-01T00:00",
+            end="2024-03-01T01:00",
+            download_dir="./rainfall_cache",
+        )
+        print(da)
+        # <xarray.DataArray 'rainfall_rate' (time: 5, y: 24, x: 20)>
+        # Coordinates:
+        #   * time  (time) datetime64[ns] ...
+        #   * y     (y)    float64  ...
+        #   * x     (x)    float64  ...
+
+        # Mean over the polygon for each timestep
+        print(da.mean(dim=["y", "x"]))
+    """
+    import shutil
+    import tempfile
+
+    import shapely
+    import xarray as xr
+
+    if isinstance(start, str):
+        start = parse_datetime(start)
+    if isinstance(end, str):
+        end = parse_datetime(end)
+
+    if end < start:
+        raise ValueError("'end' must be >= 'start'")
+
+    # --- Reproject polygon and derive a pixel-aligned BNG extraction extent --
+    polygon_bng = _polygon_to_bng(polygon)
+    if polygon_bng.area == 0.0:
+        raise ValueError("Input polygon has zero area after reprojection to BNG.")
+
+    x_min_bb, y_min_bb, x_max_bb, y_max_bb = polygon_bng.bounds
+
+    # Snap to the resolution grid so pixel centres are aligned consistently.
+    x_min = float(np.floor(x_min_bb / res) * res)
+    y_min = float(np.floor(y_min_bb / res) * res)
+    x_max = float((np.ceil(x_max_bb / res) + 1) * res)
+    y_max = float((np.ceil(y_max_bb / res) + 1) * res)
+
+    logger.info("get_rainfall_for_polygon")
+    logger.info(
+        "  Polygon BNG bounds : %.0f, %.0f → %.0f, %.0f",
+        x_min_bb,
+        y_min_bb,
+        x_max_bb,
+        y_max_bb,
+    )
+    logger.info(
+        "  Extraction extent  : x=[%.0f, %.0f]  y=[%.0f, %.0f]  res=%d m",
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        res,
+    )
+    logger.info("  Time range         : %s → %s", start.isoformat(), end.isoformat())
+
+    # --- Resolve download directory ------------------------------------------
+    _tmp_dir: str | None = None
+    if download_dir is None:
+        _tmp_dir = tempfile.mkdtemp(prefix="eoflow_rainfall_")
+        dl_dir = Path(_tmp_dir)
+        logger.debug("Using temporary download directory: %s", _tmp_dir)
+    else:
+        dl_dir = Path(download_dir)
+
+    _empty_da = xr.DataArray(
+        data=np.empty((0, 0, 0), dtype=np.float32),
+        dims=["time", "y", "x"],
+        name="rainfall_rate",
+        attrs={"units": "mm/h", "crs": "EPSG:27700"},
+    )
+
+    try:
+        # --- Step 1: Download NetCDF files ------------------------------------
+        logger.info("Downloading rainfall NetCDF files ...")
+        counts = download_rainfall(
+            start=start,
+            end=end,
+            output_dir=dl_dir,
+            run_hour=run_hour,
+            workers=workers,
+        )
+        logger.info(
+            "  Downloaded: %d  Skipped: %d  Errors: %d",
+            counts["downloaded"],
+            counts["skipped"],
+            counts["error"],
+        )
+
+        # --- Step 2: Discover downloaded files --------------------------------
+        nc_files = find_netcdf_files(dl_dir)
+        if not nc_files:
+            logger.warning("No rainfall NetCDF files found for the given time range.")
+            return _empty_da
+
+        logger.info("Regridding %d file(s) to BNG ...", len(nc_files))
+
+        # --- Step 3: Pre-compute the BNG grid and polygon mask ---------------
+        # The grid is determined entirely by the snapped extent and resolution,
+        # so it is identical for every file — build the mask once.
+        eastings = np.arange(x_min, x_max, res, dtype=np.float64)
+        northings = np.arange(y_min, y_max, res, dtype=np.float64)
+
+        xx, yy = np.meshgrid(eastings, northings)
+        grid_points = shapely.points(xx.ravel(), yy.ravel())
+        polygon_mask = shapely.within(grid_points, polygon_bng).reshape(xx.shape)
+
+        n_inside = int(polygon_mask.sum())
+        n_total = polygon_mask.size
+        logger.info(
+            "  Polygon covers %d / %d pixel(s) (%.1f%%) on the BNG grid.",
+            n_inside,
+            n_total,
+            100.0 * n_inside / n_total if n_total > 0 else 0.0,
+        )
+
+        # --- Step 4: Load, reproject, and mask each file ----------------------
+        slices: list[np.ndarray] = []
+        valid_times: list[datetime] = []
+
+        for nc_path in sorted(nc_files):
+            # Derive the valid timestamp from the file path.
+            _, valid_str = parse_timestamps_from_path(nc_path)
+            vt: datetime | None = None
+            if valid_str is not None:
+                try:
+                    vt = datetime.strptime(valid_str, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    logger.warning("Could not parse valid time from path: %s", nc_path.name)
+
+            try:
+                data = _load_cube_for_polygon(nc_path, x_min, x_max, y_min, y_max, res)
+            except Exception as exc:
+                logger.error("  [error] failed to load %s: %s", nc_path.name, exc)
+                continue
+
+            # Mask cells outside the polygon.
+            data[~polygon_mask] = np.nan
+
+            slices.append(data)
+            valid_times.append(vt)  # type: ignore[arg-type]
+            logger.debug("  [ok] %s  (valid time: %s)", nc_path.name, vt)
+
+        if not slices:
+            logger.warning("No files were successfully processed.")
+            return _empty_da
+
+        # --- Step 5: Assemble xarray DataArray --------------------------------
+        da = xr.DataArray(
+            data=np.stack(slices, axis=0),  # (time, y, x)
+            coords={
+                "time": valid_times,
+                "y": northings,
+                "x": eastings,
+            },
+            dims=["time", "y", "x"],
+            name="rainfall_rate",
+            attrs={
+                "units": "mm/h",
+                "long_name": "Rainfall rate",
+                "crs": "EPSG:27700",
+                "source": "Met Office UKV 2km deterministic model",
+            },
+        )
+
+        logger.info(
+            "Assembled DataArray: %d timestep(s), grid %d (y) × %d (x).",
+            len(valid_times),
+            len(northings),
+            len(eastings),
+        )
+
+        return da
+
+    finally:
+        if _tmp_dir is not None:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+            logger.debug("Removed temporary download directory: %s", _tmp_dir)
 
 
 # ---------------------------------------------------------------------------
