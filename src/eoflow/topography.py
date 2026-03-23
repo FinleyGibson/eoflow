@@ -3,19 +3,23 @@ topography.py
 
 Land topography and slope data access for the eoflow package.
 
-This module provides two complementary capabilities:
+This module provides three complementary capabilities:
 
 1. **Topography** – extract elevation data from a Digital Elevation Model
    (DEM) for a given polygon, returning a structured xarray DataArray on a
    British National Grid (EPSG:27700) regular grid.
 
-2. **Slope** – compute the terrain slope for a given polygon using the
-   Horn (1981) 3×3 neighbourhood method, which is identical to the
+2. **Slope magnitude** – compute the terrain slope for a given polygon using
+   the Horn (1981) 3×3 neighbourhood method, which is identical to the
    algorithm used by ArcGIS Spatial Analyst.
 
-Both functions accept a Shapely geometry in WGS-84 (EPSG:4326) and a path
-to a GeoTIFF DEM.  They reproject the raster onto a BNG grid aligned with
-the polygon's extent, mask all cells outside the polygon to ``NaN``, and
+3. **Slope direction (aspect)** – compute the compass bearing of the steepest
+   uphill direction for each cell using the same Horn (1981) partial
+   derivatives, expressed as degrees or radians clockwise from North.
+
+All three functions accept a Shapely geometry in WGS-84 (EPSG:4326) and a
+path to a GeoTIFF DEM.  They reproject the raster onto a BNG grid aligned
+with the polygon's extent, mask all cells outside the polygon to ``NaN``, and
 return an :class:`xarray.DataArray`.
 
 Slope algorithm
@@ -41,8 +45,25 @@ For each central cell ``e`` in the 3 × 3 neighbourhood::
 where :math:`\\Delta x` and :math:`\\Delta y` are the cell sizes in the
 easting and northing directions respectively (metres on BNG).
 
-The output is reported in **degrees** by default but can also be expressed
-as **percent rise** or **radians**.
+The slope magnitude is reported in **degrees** by default but can also be
+expressed as **percent rise** or **radians**.
+
+Aspect algorithm
+----------------
+The aspect (slope direction) is derived from the same Horn (1981) partial
+derivatives.  The gradient vector :math:`(dz/dx,\\, dz/dy)` points in the
+direction of steepest ascent in BNG Cartesian space (East = +x, North = +y).
+The aspect is the compass bearing of that vector, measured **clockwise from
+North**:
+
+.. math::
+
+    \\text{aspect} = \\left(90^{\\circ}
+                     - \\arctan2\\!\\left(\\frac{dz}{dy},\\,\\frac{dz}{dx}\\right)
+                     \\right) \\bmod 360^{\\circ}
+
+Cells where both partial derivatives are zero (flat terrain) are set to
+``NaN``.
 
 References
 ----------
@@ -52,6 +73,9 @@ https://doi.org/10.1109/PROC.1981.11918
 
 ArcGIS Pro Tool Reference – Slope (Spatial Analyst):
 https://pro.arcgis.com/en/pro-app/3.4/tool-reference/spatial-analyst/slope.htm
+
+ArcGIS Pro Tool Reference – Aspect (Spatial Analyst):
+https://pro.arcgis.com/en/pro-app/3.4/tool-reference/spatial-analyst/aspect.htm
 """
 
 from __future__ import annotations
@@ -188,6 +212,123 @@ def _load_dem_for_polygon(
     dst_array = dst_array[::-1, :]
 
     return dst_array, eastings, northings
+
+
+def _compute_aspect(
+    elevation: np.ndarray,
+    cell_size_x: float,
+    cell_size_y: float,
+    output: Literal["degrees", "radians"] = "degrees",
+) -> np.ndarray:
+    """Compute slope aspect (direction) using Horn's (1981) 3 × 3 neighbourhood.
+
+    The aspect is the compass bearing of the steepest uphill direction,
+    measured **clockwise from North** (0 = North, 90 = East, 180 = South,
+    270 = West).  Flat cells (zero gradient magnitude) are set to ``NaN``.
+
+    Parameters
+    ----------
+    elevation :
+        2-D array of elevation values (metres).  NaN for no-data.
+    cell_size_x :
+        Cell width in the x (easting) direction (metres).
+    cell_size_y :
+        Cell height in the y (northing) direction (metres).
+    output :
+        Unit for the output aspect values:
+
+        - ``"degrees"`` – compass bearing in degrees, range [0, 360).
+        - ``"radians"`` – compass bearing in radians, range [0, 2π).
+
+    Returns
+    -------
+    numpy.ndarray, shape same as *elevation*, dtype float32
+        Aspect values.  Border cells, cells adjacent to missing elevation
+        data, and flat cells are set to ``NaN``.
+
+    Notes
+    -----
+    The 3 × 3 neighbourhood is labelled with row indices increasing
+    **northward** (after the south-to-north array flip applied in
+    :func:`_load_dem_for_polygon`)::
+
+        a  b  c   <- southernmost row of the window
+        d  e  f
+        g  h  i   <- northernmost row of the window
+
+    The Horn (1981) partial derivatives are therefore:
+
+    .. math::
+
+        \\frac{dz}{dx} = \\frac{(c + 2f + i) - (a + 2d + g)}{8 \\cdot \\Delta x}
+
+        \\frac{dz}{dy} = \\frac{(g + 2h + i) - (a + 2b + c)}{8 \\cdot \\Delta y}
+
+    where positive :math:`dz/dx` means terrain rises going East and positive
+    :math:`dz/dy` means terrain rises going North.  The aspect is then:
+
+    .. math::
+
+        \\text{aspect} = \\left(90^{\\circ}
+                         - \\arctan2\\!\\left(\\frac{dz}{dy},\\,\\frac{dz}{dx}\\right)
+                         \\right) \\bmod 360^{\\circ}
+    """
+    nrows, ncols = elevation.shape
+    aspect = np.full((nrows, ncols), np.nan, dtype=np.float32)
+
+    if nrows < 3 or ncols < 3:
+        # Grid too small to compute any aspect values.
+        return aspect
+
+    # Extract the eight neighbours via vectorised slicing.
+    # Row indices increase northward, so row 0 is south and row -1 is north.
+    a = elevation[0:-2, 0:-2]
+    b = elevation[0:-2, 1:-1]
+    c = elevation[0:-2, 2:]
+    d = elevation[1:-1, 0:-2]
+    # e = elevation[1:-1, 1:-1]  # central cell – not needed explicitly
+    f = elevation[1:-1, 2:]
+    g = elevation[2:, 0:-2]
+    h = elevation[2:, 1:-1]
+    i = elevation[2:, 2:]
+
+    # Partial derivatives (Horn 1981) – identical to those in _compute_slope.
+    # dz_dx > 0 ↔ terrain rises going East.
+    # dz_dy > 0 ↔ terrain rises going North.
+    dz_dx = ((c + 2.0 * f + i) - (a + 2.0 * d + g)) / (8.0 * cell_size_x)
+    dz_dy = ((g + 2.0 * h + i) - (a + 2.0 * b + c)) / (8.0 * cell_size_y)
+
+    # atan2(dz_dy, dz_dx) gives the uphill direction as a mathematical angle
+    # (counter-clockwise from East, in radians).
+    # Converting to compass bearing (clockwise from North):
+    #   compass = (π/2 − math_angle) mod 2π
+    aspect_rad = (np.pi / 2.0 - np.arctan2(dz_dy, dz_dx)) % (2.0 * np.pi)
+
+    if output == "radians":
+        result = aspect_rad.astype(np.float32)
+    else:  # "degrees" (default)
+        result = np.degrees(aspect_rad).astype(np.float32)
+
+    # Flat cells (zero gradient) → NaN.
+    flat_mask = (dz_dx == 0.0) & (dz_dy == 0.0)
+    result[flat_mask] = np.nan
+
+    aspect[1:-1, 1:-1] = result
+
+    # Propagate NaN wherever any of the eight neighbours was NaN.
+    nan_mask = (
+        np.isnan(a)
+        | np.isnan(b)
+        | np.isnan(c)
+        | np.isnan(d)
+        | np.isnan(f)
+        | np.isnan(g)
+        | np.isnan(h)
+        | np.isnan(i)
+    )
+    aspect[1:-1, 1:-1][nan_mask] = np.nan
+
+    return aspect
 
 
 def _compute_slope(
@@ -637,6 +778,196 @@ def get_slope_for_polygon(
 
     logger.info(
         "Assembled slope DataArray: grid %d (y) × %d (x).",
+        len(northings_out),
+        len(eastings_out),
+    )
+
+    return da
+
+
+def get_aspect_for_polygon(
+    polygon,
+    dem_path: Path | str,
+    *,
+    res: int = DEFAULT_RESOLUTION_M,
+    output: Literal["degrees", "radians"] = "degrees",
+) -> "xarray.DataArray":
+    """Compute terrain aspect (slope direction) clipped to a polygon from a DEM.
+
+    Uses Horn's (1981) 3 × 3 neighbourhood method to derive the compass
+    bearing of the steepest uphill direction for each grid cell.  The aspect
+    is measured **clockwise from North** (0 = North, 90 = East, 180 = South,
+    270 = West).
+
+    The DEM is reprojected to British National Grid (EPSG:27700) before the
+    aspect is computed so that the x and y cell sizes are both expressed in
+    metres, giving correct results regardless of the DEM's source CRS.
+
+    Parameters
+    ----------
+    polygon :
+        Area of interest in **WGS-84 (EPSG:4326)**.  May be a
+        ``shapely.geometry.Polygon`` or ``MultiPolygon`` – for example, a
+        catchment boundary returned by
+        :func:`eoflow.catchment.delineate_catchment`.
+    dem_path :
+        Path to a GeoTIFF DEM (any CRS; will be reprojected to BNG via
+        bilinear resampling).
+    res :
+        Output grid resolution in BNG metres (default:
+        :data:`DEFAULT_RESOLUTION_M` = 50 m).
+    output :
+        Units for the aspect output:
+
+        - ``"degrees"`` – compass bearing in degrees, range [0, 360).
+        - ``"radians"`` – compass bearing in radians, range [0, 2π).
+
+    Returns
+    -------
+    xarray.DataArray
+        Aspect with dimensions ``(y, x)``:
+
+        - ``y`` – BNG northings (metres, EPSG:27700), south-to-north.
+        - ``x`` – BNG eastings (metres, EPSG:27700), west-to-east.
+
+        Cells whose centre lies **outside** *polygon*, outermost border cells
+        (which lack a full 3 × 3 neighbourhood), cells adjacent to missing
+        elevation data, and flat cells (zero gradient) are ``NaN``.
+
+        ``attrs`` on the returned array:
+
+        - ``units``      ``"degrees"`` or ``"radians"``
+        - ``long_name``  ``"Aspect"``
+        - ``crs``        ``"EPSG:27700"``
+        - ``source``     absolute path to the DEM file
+        - ``method``     ``"Horn (1981) 3x3 neighbourhood"``
+        - ``convention`` ``"clockwise from North"``
+
+    Raises
+    ------
+    FileNotFoundError
+        If *dem_path* does not exist.
+    ValueError
+        If the reprojected polygon has zero area, or if *output* is not
+        one of the recognised strings.
+
+    Examples
+    --------
+    ::
+
+        from shapely.geometry import box
+        from eoflow.topography import get_aspect_for_polygon
+
+        dartmoor = box(-3.9, 50.5, -3.7, 50.7)
+        da = get_aspect_for_polygon(
+            dartmoor,
+            dem_path="data/devon_dem.tif",
+            output="degrees",
+        )
+        # Mean aspect – roughly which compass direction the area faces
+        print(da.mean().item(), "°")
+
+        # Radians output
+        da_rad = get_aspect_for_polygon(
+            dartmoor,
+            dem_path="data/devon_dem.tif",
+            output="radians",
+        )
+    """
+    import shapely
+    import xarray as xr
+
+    valid_outputs = {"degrees", "radians"}
+    if output not in valid_outputs:
+        raise ValueError(f"'output' must be one of {sorted(valid_outputs)!r}, got {output!r}.")
+
+    dem_path = Path(dem_path)
+    if not dem_path.exists():
+        raise FileNotFoundError(f"DEM file not found: {dem_path}")
+
+    # --- Reproject polygon to BNG and derive snapped extraction extent -----
+    polygon_bng = _polygon_to_bng(polygon)
+    if polygon_bng.area == 0.0:
+        raise ValueError("Input polygon has zero area after reprojection to BNG.")
+
+    x_min_bb, y_min_bb, x_max_bb, y_max_bb = polygon_bng.bounds
+
+    # Add a one-cell buffer so that every cell inside the polygon has a full
+    # 3 × 3 neighbourhood available for the aspect kernel.
+    x_min_buf = float(np.floor(x_min_bb / res) * res) - res
+    y_min_buf = float(np.floor(y_min_bb / res) * res) - res
+    x_max_buf = float((np.ceil(x_max_bb / res) + 1) * res) + res
+    y_max_buf = float((np.ceil(y_max_bb / res) + 1) * res) + res
+
+    logger.info("get_aspect_for_polygon")
+    logger.info(
+        "  Polygon BNG bounds : %.0f, %.0f → %.0f, %.0f",
+        x_min_bb,
+        y_min_bb,
+        x_max_bb,
+        y_max_bb,
+    )
+    logger.info(
+        "  Buffered extent    : x=[%.0f, %.0f]  y=[%.0f, %.0f]  res=%d m",
+        x_min_buf,
+        x_max_buf,
+        y_min_buf,
+        y_max_buf,
+        res,
+    )
+    logger.info("  Aspect output units : %s", output)
+
+    # --- Load and warp DEM (with buffer) -----------------------------------
+    elevation, eastings_buf, northings_buf = _load_dem_for_polygon(
+        dem_path, x_min_buf, x_max_buf, y_min_buf, y_max_buf, res
+    )
+
+    # --- Compute aspect on the full buffered grid --------------------------
+    aspect_buf = _compute_aspect(
+        elevation,
+        cell_size_x=float(res),
+        cell_size_y=float(res),
+        output=output,
+    )
+
+    # --- Build polygon mask on the buffered grid and apply -----------------
+    xx, yy = np.meshgrid(eastings_buf, northings_buf)
+    grid_points = shapely.points(xx.ravel(), yy.ravel())
+    polygon_mask = shapely.within(grid_points, polygon_bng).reshape(xx.shape)
+
+    aspect_buf[~polygon_mask] = np.nan
+
+    # --- Crop to the original (un-buffered) snapped extent -----------------
+    x_min_out = float(np.floor(x_min_bb / res) * res)
+    y_min_out = float(np.floor(y_min_bb / res) * res)
+    x_max_out = float((np.ceil(x_max_bb / res) + 1) * res)
+    y_max_out = float((np.ceil(y_max_bb / res) + 1) * res)
+
+    x_mask = (eastings_buf >= x_min_out) & (eastings_buf < x_max_out)
+    y_mask = (northings_buf >= y_min_out) & (northings_buf < y_max_out)
+
+    aspect_out = aspect_buf[np.ix_(y_mask, x_mask)]
+    eastings_out = eastings_buf[x_mask]
+    northings_out = northings_buf[y_mask]
+
+    # --- Assemble xarray DataArray ----------------------------------------
+    da = xr.DataArray(
+        data=aspect_out,
+        coords={"y": northings_out, "x": eastings_out},
+        dims=["y", "x"],
+        name="aspect",
+        attrs={
+            "units": output,
+            "long_name": "Aspect",
+            "crs": "EPSG:27700",
+            "source": str(dem_path.resolve()),
+            "method": "Horn (1981) 3x3 neighbourhood",
+            "convention": "clockwise from North",
+        },
+    )
+
+    logger.info(
+        "Assembled aspect DataArray: grid %d (y) × %d (x).",
         len(northings_out),
         len(eastings_out),
     )
