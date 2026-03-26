@@ -1,0 +1,171 @@
+# eoflow/folium_config.toml
+#
+# Default configuration for the eoflow.folium visualisation helpers.
+# All values here act as fallbacks — any parameter passed explicitly to a
+# helper function takes precedence over the value in this file.
+#
+# Load / reload at runtime with:
+#   from eoflow.folium import load_folium_config
+#   cfg = load_folium_config()
+
+# ---------------------------------------------------------------------------
+# Base map
+# ---------------------------------------------------------------------------
+
+[map]
+
+# Tile layer served as the basemap.
+# Any string accepted by folium.Map(tiles=...) is valid, e.g.:
+#   "CartoDB positron"  — light, minimal (default)
+#   "CartoDB dark_matter"
+#   "OpenStreetMap"
+#   "Stamen Terrain"
+tiles = "CartoDB positron"
+
+# Disable scroll-wheel zoom by default so the map doesn't hijack page scroll.
+scroll_wheel_zoom = false
+
+# CSS width of the map iframe.
+width = "100%"
+
+# Map height in pixels.
+height = 540
+
+# Default zoom levels for different spatial contexts.
+zoom_overview  = 9    # county / regional scale  (e.g. Devon)
+zoom_catchment = 14   # catchment polygon scale
+zoom_close     = 15   # single-site close-up
+
+# ---------------------------------------------------------------------------
+# Vector layer colours
+# ---------------------------------------------------------------------------
+
+[colors]
+
+# --- Area / county boundary -------------------------------------------------
+
+# Outline colour for the area boundary polygon (e.g. Devon county).
+boundary_color        = "#2c6e8a"
+
+# Interior fill colour for the area polygon.
+boundary_fill         = "#d4e8f0"
+
+# Interior fill opacity  (0 = transparent, 1 = opaque).
+boundary_fill_opacity = 0.15
+
+# Outline stroke width in pixels.
+boundary_weight       = 2.5
+
+# --- Catchment polygon ------------------------------------------------------
+
+# Outline colour for delineated catchment polygons.
+catchment_color        = "#2d6a4f"
+
+# Fill colour for delineated catchment polygons.
+catchment_fill         = "#95d5b2"
+
+# Fill opacity for catchment polygons.
+catchment_fill_opacity = 0.35
+
+# Outline stroke width.
+catchment_weight       = 1.2
+
+# --- Sample / monitoring site -----------------------------------------------
+
+# Outline colour for the CircleMarker at the sample location.
+sample_point_color   = "#c0392b"
+
+# Fill colour for the CircleMarker.
+sample_point_fill    = "#e74c3c"
+
+# Radius of the CircleMarker in pixels.
+sample_point_radius  = 7
+
+# --- Pour / snap point ------------------------------------------------------
+
+# Folium named colour for the pour-point Marker icon.
+# Must be one of folium's built-in named colours:
+#   red, blue, green, purple, orange, darkred, lightred, beige,
+#   darkblue, darkgreen, cadetblue, darkpurple, white, pink,
+#   lightblue, lightgreen, gray, black, lightgray
+pour_point_color = "orange"
+
+# --- Offset / connector line ------------------------------------------------
+
+# Colour of the dashed line connecting the sample site to the pour point.
+offset_line_color  = "#7f8c8d"
+
+# Stroke width of the offset line in pixels.
+offset_line_weight = 1.5
+
+# SVG dash pattern (px on, px off).
+offset_line_dash   = "5 5"
+
+# ---------------------------------------------------------------------------
+# Raster overlays
+# ---------------------------------------------------------------------------
+
+[raster]
+
+# Default opacity applied to all ImageOverlay rasters (0–1).
+alpha = 0.70
+
+# Percentile bounds used to auto-derive vmin/vmax when not supplied explicitly.
+# Values outside this range are clipped to the colour-scale limits.
+percentile_clip_lo = 2
+percentile_clip_hi = 98
+
+# ---------------------------------------------------------------------------
+# Colourmap names (Matplotlib)
+# ---------------------------------------------------------------------------
+#
+# Any valid Matplotlib colourmap name is accepted, e.g. those listed at
+# https://matplotlib.org/stable/gallery/color/colormap_reference.html
+#
+# Cyclic colormaps (e.g. "twilight") are recommended for angular data (aspect).
+
+[colormaps]
+
+# Terrain elevation — continuous, perceptually graded.
+elevation = "terrain"
+
+# Terrain slope — sequential, highlights steep terrain in warm colours.
+slope     = "YlOrRd"
+
+# Terrain aspect (compass bearing 0–360°) — cyclic so North maps to the
+# same colour at both 0° and 360°.
+aspect    = "twilight"
+
+# Normalised Difference Vegetation Index  (−1 to 1).
+ndvi      = "RdYlGn"
+
+# Normalised Difference Water Index  (−1 to 1).
+ndwi      = "RdBu"
+
+# Enhanced Vegetation Index  (0 to ~1).
+evi       = "YlGn"
+
+# Modified NDWI  (−1 to 1).
+mndwi     = "RdBu"
+
+# Red-Edge NDVI variant.
+ndre      = "PRGn"
+
+# Met Office UKV rainfall rate (mm/h).
+rainfall  = "Blues"
+
+# SEARG soil-group polygons (categorical, used for discrete legends).
+soil      = "Set3"
+
+# ---------------------------------------------------------------------------
+# Colour-bar legend
+# ---------------------------------------------------------------------------
+
+[legend]
+
+# Number of colour steps rendered in the HTML legend box.
+steps = 5
+
+# Approximate screen position of the legend box.
+# Currently only "bottom-left" is implemented in legend_html().
+position = "bottom-left"
