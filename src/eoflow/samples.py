@@ -90,6 +90,11 @@ class CatchmentLayers:
         Terrain slope grid (units depend on the ``output`` kwarg supplied to
         :meth:`CatchmentSample.compute_slope`, default degrees), shape
         ``(y, x)``.  Populated by :meth:`CatchmentSample.compute_slope`.
+    aspect : xarray.DataArray or None
+        Terrain aspect (slope direction) as a compass bearing clockwise from
+        North, shape ``(y, x)``.  Units depend on the ``output`` kwarg
+        supplied to :meth:`CatchmentSample.compute_aspect` (default degrees,
+        range 0–360).  Populated by :meth:`CatchmentSample.compute_aspect`.
     soil_type : pandas.Series or None
         Fractional SEARG soil-group coverage within the catchment (values
         0–1, indexed by the 12 SEARG group names).  Values sum to ≤ 1 (the
@@ -105,6 +110,7 @@ class CatchmentLayers:
 
     topography: Optional["xarray.DataArray"] = field(default=None)
     slope: Optional["xarray.DataArray"] = field(default=None)
+    aspect: Optional["xarray.DataArray"] = field(default=None)
     soil_type: Optional[pd.Series] = field(default=None)
     rainfall: Optional["xarray.DataArray"] = field(default=None)
 
@@ -113,7 +119,7 @@ class CatchmentLayers:
         """Names of layers that have been computed (non-``None``)."""
         return [
             name
-            for name in ("topography", "slope", "soil_type", "rainfall")
+            for name in ("topography", "slope", "aspect", "soil_type", "rainfall")
             if getattr(self, name) is not None
         ]
 
@@ -469,6 +475,68 @@ class Sample:
         )
         return da
 
+    def compute_aspect(
+        self,
+        dem_path: Union[str, Path],
+        *,
+        res: int = 50,
+        output: Literal["degrees", "radians"] = "degrees",
+    ) -> "xarray.DataArray":
+        """Compute terrain aspect (slope direction) for the catchment from a DEM.
+
+        Delegates to :func:`eoflow.topography.get_aspect_for_polygon` using
+        Horn's (1981) 3 × 3 neighbourhood method and stores the result in
+        :attr:`layers.aspect`.
+
+        Aspect is measured **clockwise from North** (0 = North, 90 = East,
+        180 = South, 270 = West).  Flat cells and border cells that lack a
+        full neighbourhood are ``NaN``.
+
+        Parameters
+        ----------
+        dem_path : str or Path
+            Path to a GeoTIFF DEM (any CRS; reprojected internally to BNG).
+        res : int
+            Output grid resolution in BNG metres (default: 50 m).
+        output : Literal["degrees", "radians"]
+            Aspect units: ``"degrees"`` (default, range 0–360) or
+            ``"radians"`` (range 0–2π).
+
+        Returns
+        -------
+        xarray.DataArray
+            Aspect grid in the requested units with dimensions ``(y, x)``,
+            CRS EPSG:27700.  Also stored in ``self.layers.aspect``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon, or if *output*
+            is not a recognised unit string.
+        FileNotFoundError
+            If *dem_path* does not exist.
+        """
+        from eoflow.topography import get_aspect_for_polygon
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info("Computing aspect (%s) for site '%s' …", output, self.site_name)
+        da = get_aspect_for_polygon(self.catchment, dem_path, res=res, output=output)
+        self.layers.aspect = da
+        logger.info(
+            "Aspect stored: grid %d × %d, range %.2f – %.2f %s.",
+            da.sizes.get("y", 0),
+            da.sizes.get("x", 0),
+            float(da.min()),
+            float(da.max()),
+            da.attrs.get("units", output),
+        )
+        return da
+
     def compute_soil_type(
         self,
         *,
@@ -625,6 +693,7 @@ class Sample:
         rainfall_res: int = 1000,
         topo_res: int = 50,
         slope_output: Literal["degrees", "percent_rise", "radians"] = "degrees",
+        aspect_output: Literal["degrees", "radians"] = "degrees",
         soil_timeout: int = 60,
         delineate_if_missing: bool = True,
         flow_acc_threshold: int = 5000,
@@ -637,8 +706,9 @@ class Sample:
            and :attr:`has_catchment` is ``False``.
         2. :meth:`compute_topography`
         3. :meth:`compute_slope`
-        4. :meth:`compute_soil_type`
-        5. :meth:`compute_rainfall` — only when both *rainfall_start* and
+        4. :meth:`compute_aspect`
+        5. :meth:`compute_soil_type`
+        6. :meth:`compute_rainfall` — only when both *rainfall_start* and
            *rainfall_end* are provided.
 
         Each step is attempted independently: a failure in one step is logged
@@ -648,8 +718,8 @@ class Sample:
         Parameters
         ----------
         dem_path : str or Path
-            Path to a GeoTIFF DEM used for delineation, topography, and
-            slope computation.
+            Path to a GeoTIFF DEM used for delineation, topography, slope,
+            and aspect computation.
         rainfall_start, rainfall_end : str or datetime, optional
             Time window for rainfall extraction.  If either is ``None``
             (the default) the rainfall step is skipped.
@@ -658,11 +728,14 @@ class Sample:
         rainfall_res : int
             BNG resolution for the rainfall grid in metres (default: 1000 m).
         topo_res : int
-            BNG resolution for the topography and slope grids in metres
-            (default: 50 m).
+            BNG resolution for the topography, slope, and aspect grids in
+            metres (default: 50 m).
         slope_output : str
             Slope units — ``"degrees"`` (default), ``"percent_rise"``, or
             ``"radians"``.
+        aspect_output : str
+            Aspect units — ``"degrees"`` (default, range 0–360 clockwise from
+            North) or ``"radians"``.
         soil_timeout : int
             HTTP timeout in seconds for the SEARG soil-data request
             (default: 60 s).
@@ -717,6 +790,16 @@ class Sample:
         except Exception as exc:
             logger.warning(
                 "Slope computation failed for site '%s': %s",
+                self.site_name,
+                exc,
+            )
+
+        # --- aspect -------------------------------------------------------
+        try:
+            self.compute_aspect(dem_path, res=topo_res, output=aspect_output)
+        except Exception as exc:
+            logger.warning(
+                "Aspect computation failed for site '%s': %s",
                 self.site_name,
                 exc,
             )
@@ -1278,6 +1361,14 @@ class Sample:
             da.to_netcdf(layers_dir / "slope.nc")
             logger.debug("Saved slope layer to %s", layers_dir / "slope.nc")
 
+        if self.layers.aspect is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.aspect
+            if da.name is None:
+                da = da.rename("aspect")
+            da.to_netcdf(layers_dir / "aspect.nc")
+            logger.debug("Saved aspect layer to %s", layers_dir / "aspect.nc")
+
         if self.layers.soil_type is not None:
             layers_dir.mkdir(parents=True, exist_ok=True)
             (layers_dir / "soil_type.json").write_text(
@@ -1353,6 +1444,11 @@ class Sample:
             if slope_path.exists():
                 sample.layers.slope = xarray.open_dataarray(slope_path).load()
                 logger.debug("Loaded slope layer from %s", slope_path)
+
+            aspect_path = layers_dir / "aspect.nc"
+            if aspect_path.exists():
+                sample.layers.aspect = xarray.open_dataarray(aspect_path).load()
+                logger.debug("Loaded aspect layer from %s", aspect_path)
 
             soil_path = layers_dir / "soil_type.json"
             if soil_path.exists():

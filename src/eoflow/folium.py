@@ -1216,6 +1216,13 @@ def _layers_from_sample(sample) -> dict:
             _get("colormaps", "slope", "YlOrRd"),
         )
 
+    if getattr(sl, "aspect", None) is not None:
+        unit = sl.aspect.attrs.get("units", "°")
+        layers[f"Aspect ({unit})"] = (
+            sl.aspect,
+            _get("colormaps", "aspect", "twilight"),
+        )
+
     if getattr(sl, "rainfall", None) is not None:
         # Collapse the time dimension before rendering
         rain_mean = sl.rainfall.mean(dim="time")
