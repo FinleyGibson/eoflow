@@ -922,6 +922,7 @@ def add_sample(
     raster_layers: dict | str | None = None,
     add_layer_control: bool = False,
     zoom_start: int | None = None,
+    clip_soil_to_catchment: bool = True,
 ) -> folium.Map:
     """Add a :class:`~eoflow.samples.CatchmentSample` to a Folium map.
 
@@ -967,7 +968,8 @@ def add_sample(
 
         ``"auto"``
             Automatically adds all layers available on ``sample.layers``
-            (topography, slope, and time-mean rainfall if computed).
+            (topography, slope, aspect, soil polygons, and time-mean
+            rainfall if computed).
 
         ``dict``
             A mapping from layer name to one of:
@@ -977,10 +979,19 @@ def add_sample(
               must be in EPSG:27700; it is warped automatically.
             * A bare ``xarray.DataArray`` in EPSG:27700 (uses the
               elevation colourmap from config).
+            * A ``geopandas.GeoDataFrame`` — rendered as a SEARG
+              soil-polygon vector layer.
 
         ``None``
             No raster overlays are added.
 
+    clip_soil_to_catchment:
+        When ``True`` (default) the SEARG soil polygons are intersected
+        with the catchment boundary before rendering, so only the portion
+        of each soil polygon that falls inside the catchment is shown.
+        Set to ``False`` to display the full unclipped service polygons.
+        Only applies when *raster_layers* is ``"auto"``; pass a
+        pre-clipped GeoDataFrame in a dict to control clipping manually.
     add_layer_control:
         Add a ``folium.LayerControl`` to the map.  Defaults to ``False``
         so that multiple calls can be chained onto the same map before the
@@ -1137,7 +1148,7 @@ def add_sample(
     # ── Raster overlays ──────────────────────────────────────────────────────
     _resolved_layers: dict | None = None
     if raster_layers == "auto":
-        _resolved_layers = _layers_from_sample(sample)
+        _resolved_layers = _layers_from_sample(sample, clip_soil=clip_soil_to_catchment)
     elif isinstance(raster_layers, dict):
         _resolved_layers = raster_layers
 
@@ -1251,7 +1262,7 @@ def _make_soil_featuregroup(gdf, name: str) -> folium.FeatureGroup:
     return fg
 
 
-def _layers_from_sample(sample) -> dict:
+def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
     """Build a ``raster_layers`` dict from ``sample.layers``.
 
     Called internally by :func:`add_sample` when ``raster_layers="auto"``.
@@ -1261,6 +1272,8 @@ def _layers_from_sample(sample) -> dict:
 
     * ``topography``  → ``colormaps.elevation``
     * ``slope``       → ``colormaps.slope``
+    * ``aspect``      → ``colormaps.aspect``
+    * ``soil_polygons`` → GeoDataFrame (optionally clipped to catchment)
     * ``rainfall``    → ``colormaps.rainfall`` (collapsed to time-mean)
 
     The ``soil_type`` layer is a ``pandas.Series`` (fractional coverage),
@@ -1271,12 +1284,19 @@ def _layers_from_sample(sample) -> dict:
     sample:
         A :class:`~eoflow.samples.CatchmentSample` with a populated
         ``.layers`` attribute.
+    clip_soil:
+        When ``True`` (default) the soil polygons GeoDataFrame is
+        intersected with the sample's catchment boundary before being
+        added to the returned dict.  Polygons that become empty after
+        clipping are dropped.  Has no effect when the sample has no
+        catchment or no ``soil_polygons`` layer.
 
     Returns
     -------
     dict
-        ``{layer_name: (DataArray, cmap_name)}`` ready for
-        :func:`add_sample`.
+        ``{layer_name: value}`` where value is either a
+        ``(DataArray, cmap_name)`` tuple (raster layers) or a
+        ``geopandas.GeoDataFrame`` (soil polygon layer).
     """
     layers: dict = {}
     sl = getattr(sample, "layers", None)
@@ -1304,7 +1324,24 @@ def _layers_from_sample(sample) -> dict:
         )
 
     if getattr(sl, "soil_polygons", None) is not None and not sl.soil_polygons.empty:
-        layers["SEARG Soil Types"] = sl.soil_polygons
+        soil_gdf = sl.soil_polygons
+        if clip_soil and getattr(sample, "catchment", None) is not None:
+            try:
+                import geopandas as _gpd
+
+                # Reproject catchment from WGS-84 to the GDF's native BNG CRS
+                catchment_bng = (
+                    _gpd.GeoSeries([sample.catchment], crs="EPSG:4326").to_crs("EPSG:27700").iloc[0]
+                )
+                clipped = soil_gdf.copy()
+                clipped["geometry"] = soil_gdf.geometry.intersection(catchment_bng)
+                clipped = clipped[
+                    clipped.geometry.notna() & ~clipped.geometry.is_empty
+                ].reset_index(drop=True)
+                soil_gdf = clipped
+            except Exception:
+                pass  # fall back to unclipped on any error
+        layers["SEARG Soil Types"] = soil_gdf
 
     if getattr(sl, "rainfall", None) is not None:
         # Collapse the time dimension before rendering

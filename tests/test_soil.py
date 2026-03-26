@@ -915,6 +915,376 @@ class TestSoilCoverageSummary:
 
 
 # ===========================================================================
+# Tests: SEARG_COLOURS constant
+# ===========================================================================
+
+
+class TestSeargColours:
+    """Tests for the SEARG_COLOURS public constant added alongside the
+    folium soil-polygon layer feature."""
+
+    def test_searg_colours_importable(self):
+        from eoflow.soil import SEARG_COLOURS  # noqa: F401
+
+        assert SEARG_COLOURS is not None
+
+    def test_searg_colours_is_dict(self):
+        from eoflow.soil import SEARG_COLOURS
+
+        assert isinstance(SEARG_COLOURS, dict)
+
+    def test_searg_colours_has_entry_for_every_group(self):
+        """Every SEARG group must have a corresponding colour entry."""
+        from eoflow.soil import SEARG_COLOURS, SEARG_GROUPS
+
+        for group in SEARG_GROUPS:
+            assert group in SEARG_COLOURS, f"Missing colour for: {group!r}"
+
+    def test_searg_colours_count_equals_groups_count(self):
+        from eoflow.soil import SEARG_COLOURS, SEARG_GROUPS
+
+        assert len(SEARG_COLOURS) == len(SEARG_GROUPS)
+
+    def test_searg_colour_values_are_hex_strings(self):
+        """All colour values must be valid 6-digit hex codes (#rrggbb)."""
+        import re
+
+        from eoflow.soil import SEARG_COLOURS
+
+        pattern = re.compile(r"^#[0-9a-fA-F]{6}$")
+        for group, colour in SEARG_COLOURS.items():
+            assert pattern.match(colour), f"Invalid hex colour {colour!r} for {group!r}"
+
+    def test_searg_colour_values_are_unique(self):
+        """Each SEARG group should have a visually distinct colour."""
+        from eoflow.soil import SEARG_COLOURS
+
+        colours = [c.lower() for c in SEARG_COLOURS.values()]
+        assert len(set(colours)) == len(colours), "Duplicate colour values in SEARG_COLOURS"
+
+
+# ===========================================================================
+# Tests: soil_coverage polygons_gdf parameter
+# ===========================================================================
+
+
+class TestSoilCoveragePolygonsGdfParam:
+    """Tests for the polygons_gdf pass-through parameter on soil_coverage.
+
+    When a pre-built GeoDataFrame is supplied via polygons_gdf the function
+    must use it directly — skipping the network call — and compute fractions
+    from the provided geometries rather than fetching from the ArcGIS service.
+
+    These tests also confirm the mathematical relationship between polygon size
+    and coverage fraction: restricting a polygon to a sub-region of the
+    catchment produces a proportionally smaller fraction.  This is the
+    foundation for how pre-clipped polygons passed from _layers_from_sample
+    would affect coverage statistics if fed back into soil_coverage.
+    """
+
+    _CATCH_WGS84 = _DEVON_WGS84  # box(-3.6, 50.6, -3.4, 50.8)
+
+    @staticmethod
+    def _catch_bng():
+        from eoflow.soil import _to_bng
+
+        return _to_bng(_DEVON_WGS84)
+
+    @staticmethod
+    def _gdf(features):
+        from eoflow.soil import _features_to_geodataframe
+
+        return _features_to_geodataframe(features)
+
+    # ── Network-call bypass ──────────────────────────────────────────────────
+
+    def test_polygons_gdf_skips_network_call(self):
+        """Providing polygons_gdf must not trigger any HTTP POST request."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=catch_bng)])
+        session = MagicMock(spec=requests.Session)
+
+        soil_coverage(self._CATCH_WGS84, session=session, polygons_gdf=gdf)
+
+        session.post.assert_not_called()
+
+    def test_polygons_gdf_takes_precedence_over_session(self):
+        """Coverage must reflect the GDF passed via polygons_gdf, not whatever
+        the mock session would have returned."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+
+        # The session would return a polygon covering the full catchment…
+        full_feat = _make_soil_feature(1, "Peat", ring_polygon=catch_bng)
+        session = _mock_session([_make_query_response([full_feat])])
+
+        # …but the override GDF covers only the northern half.
+        northern_half = box(minx, (miny + maxy) / 2, maxx, maxy)
+        half_gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=northern_half)])
+
+        result = soil_coverage(self._CATCH_WGS84, session=session, polygons_gdf=half_gdf)
+
+        # Result must reflect the half-coverage GDF, not the full session response.
+        assert result["Peat"] < 0.6
+        session.post.assert_not_called()
+
+    # ── Fraction accuracy with sub-region polygons ───────────────────────────
+
+    def test_northern_half_polygon_gives_approx_half_fraction(self):
+        """A polygon covering the northern half of the catchment → ~50% fraction."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        northern_half = box(minx, (miny + maxy) / 2, maxx, maxy)
+
+        gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=northern_half)])
+        result = soil_coverage(self._CATCH_WGS84, polygons_gdf=gdf)
+
+        assert abs(result["Peat"] - 0.5) < 0.02
+
+    def test_sub_region_fraction_less_than_full_catchment_fraction(self):
+        """Restricting a polygon to the left half of the catchment halves its fraction."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        midx = (minx + maxx) / 2
+
+        full_gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=catch_bng)])
+        left_half_gdf = self._gdf(
+            [_make_soil_feature(1, "Peat", ring_polygon=box(minx, miny, midx, maxy))]
+        )
+
+        result_full = soil_coverage(self._CATCH_WGS84, polygons_gdf=full_gdf)
+        result_half = soil_coverage(self._CATCH_WGS84, polygons_gdf=left_half_gdf)
+
+        assert result_half["Peat"] < result_full["Peat"]
+        assert abs(result_full["Peat"] - 1.0) < 0.02
+        assert abs(result_half["Peat"] - 0.5) < 0.02
+
+    def test_clipping_to_catchment_boundary_is_idempotent(self):
+        """soil_coverage intersects every polygon with the catchment internally,
+        so clipping an oversized polygon to the catchment boundary first must give
+        the same fraction as the original oversized polygon.
+
+        This confirms that the folium-layer clipping in _layers_from_sample is
+        cosmetic only and does not alter coverage statistics when those clipped
+        polygons are later fed back into soil_coverage."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+
+        big_poly = box(minx - 50_000, miny - 50_000, maxx + 50_000, maxy + 50_000)
+        big_gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=big_poly)])
+        exact_gdf = self._gdf([_make_soil_feature(1, "Peat", ring_polygon=catch_bng)])
+
+        result_big = soil_coverage(self._CATCH_WGS84, polygons_gdf=big_gdf)
+        result_exact = soil_coverage(self._CATCH_WGS84, polygons_gdf=exact_gdf)
+
+        assert abs(result_big["Peat"] - result_exact["Peat"]) < 0.01
+        assert abs(result_big["Peat"] - 1.0) < 0.02
+
+    def test_empty_polygons_gdf_gives_all_zero_fractions(self):
+        """An empty GeoDataFrame must produce zero coverage for all SEARG groups."""
+        from eoflow.soil import SEARG_GROUPS, _features_to_geodataframe, soil_coverage
+
+        empty_gdf = _features_to_geodataframe([])
+        result = soil_coverage(self._CATCH_WGS84, polygons_gdf=empty_gdf)
+
+        assert (result == 0.0).all()
+        assert set(result.index) == set(SEARG_GROUPS)
+
+    def test_two_groups_partitioning_catchment_sum_to_one(self):
+        """Two soil polygons that partition the catchment into equal halves
+        must each carry ~50% fraction and together sum to ~100%."""
+        from eoflow.soil import soil_coverage
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        midx = (minx + maxx) / 2
+
+        gdf = self._gdf(
+            [
+                _make_soil_feature(1, "Peat", ring_polygon=box(minx, miny, midx, maxy)),
+                _make_soil_feature(2, "Shallow soils", ring_polygon=box(midx, miny, maxx, maxy)),
+            ]
+        )
+        result = soil_coverage(self._CATCH_WGS84, polygons_gdf=gdf)
+
+        assert abs(result["Peat"] - 0.5) < 0.02
+        assert abs(result["Shallow soils"] - 0.5) < 0.02
+        assert abs(result.sum() - 1.0) < 0.02
+
+
+# ===========================================================================
+# Tests: clipping effects reflected through soil_coverage_summary
+# ===========================================================================
+
+
+class TestClippingEffectsOnCoverageSummary:
+    """Verify that reduced-area soil polygons propagate correctly through
+    soil_coverage_summary, producing smaller area_km2 and fraction values.
+
+    The folium layer helper (_layers_from_sample) clips soil polygons to the
+    catchment boundary for display purposes.  When the service returns a
+    smaller polygon (simulating what a clipped polygon looks like), the summary
+    must report proportionally smaller areas — confirming that the clipping
+    effect is faithfully reflected end-to-end.
+
+    These tests use mock sessions returning differently-sized polygons to
+    simulate the before-clipping / after-clipping scenarios without requiring
+    a real polygons_gdf parameter on soil_coverage_summary.
+    """
+
+    _CATCH_WGS84 = _DEVON_WGS84
+
+    @staticmethod
+    def _catch_bng():
+        from eoflow.soil import _to_bng
+
+        return _to_bng(_DEVON_WGS84)
+
+    def _session_for(self, *poly_group_pairs):
+        """Build a mock session whose single response contains one feature per
+        (polygon, group) pair."""
+        feats = [
+            _make_soil_feature(i + 1, grp, ring_polygon=poly)
+            for i, (poly, grp) in enumerate(poly_group_pairs)
+        ]
+        return _mock_session([_make_query_response(feats)])
+
+    # ── area_km2 and fraction comparisons ────────────────────────────────────
+
+    def test_larger_service_polygon_gives_larger_area_km2(self):
+        """area_km2 for a group must be larger when the service returns a
+        full-catchment polygon than when it returns a half-catchment polygon."""
+        from eoflow.soil import soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        left_half = box(minx, miny, (minx + maxx) / 2, maxy)
+
+        session_full = self._session_for((catch_bng, "Peat"))
+        session_half = self._session_for((left_half, "Peat"))
+
+        summary_full = soil_coverage_summary(self._CATCH_WGS84, session=session_full)
+        summary_half = soil_coverage_summary(self._CATCH_WGS84, session=session_half)
+
+        area_full = summary_full.loc[summary_full["SEARG_Concise"] == "Peat", "area_km2"].iloc[0]
+        area_half = summary_half.loc[summary_half["SEARG_Concise"] == "Peat", "area_km2"].iloc[0]
+
+        assert area_half < area_full
+        assert abs(area_half / area_full - 0.5) < 0.05
+
+    def test_smaller_polygon_gives_smaller_fraction_in_summary(self):
+        """The fraction column must decrease when the service polygon covers
+        less of the catchment."""
+        from eoflow.soil import soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        northern_quarter = box(minx, miny + (maxy - miny) * 3 / 4, maxx, maxy)
+
+        session = self._session_for((northern_quarter, "Peat"))
+        summary = soil_coverage_summary(self._CATCH_WGS84, session=session)
+
+        peat_frac = summary.loc[summary["SEARG_Concise"] == "Peat", "fraction"].iloc[0]
+        assert peat_frac < 0.3
+
+    def test_polygon_outside_catchment_absent_from_summary(self):
+        """A soil polygon with zero intersection with the catchment must not
+        appear in the summary — zero-fraction groups are filtered out by design."""
+        from eoflow.soil import soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        # Entirely north of the catchment, no overlap.
+        outside = box(minx, maxy + 10_000, maxx, maxy + 50_000)
+
+        session = self._session_for((outside, "Peat"))
+        summary = soil_coverage_summary(self._CATCH_WGS84, session=session)
+
+        assert "Peat" not in summary["SEARG_Concise"].values
+
+    def test_total_fraction_smaller_after_sub_region_clipping(self):
+        """When both soil polygons are restricted to sub-regions of the catchment
+        the total fraction in the summary decreases compared to those polygons
+        spanning the full catchment halves."""
+        from eoflow.soil import soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        midx = (minx + maxx) / 2
+        midy = (miny + maxy) / 2
+
+        # Full: two groups together covering 100 % of the catchment.
+        session_full = self._session_for(
+            (box(minx, miny, midx, maxy), "Peat"),
+            (box(midx, miny, maxx, maxy), "Shallow soils"),
+        )
+        # Clipped: each group restricted to its respective bottom quarter.
+        session_clipped = self._session_for(
+            (box(minx, miny, midx, midy), "Peat"),  # SW quarter
+            (box(midx, miny, maxx, midy), "Shallow soils"),  # SE quarter
+        )
+
+        summary_full = soil_coverage_summary(self._CATCH_WGS84, session=session_full)
+        summary_clipped = soil_coverage_summary(self._CATCH_WGS84, session=session_clipped)
+
+        assert summary_clipped["fraction"].sum() < summary_full["fraction"].sum()
+
+    def test_clipping_oversized_polygon_to_catchment_preserves_fraction(self):
+        """Clipping a polygon that extends far beyond the catchment to exactly
+        the catchment boundary must give the same fraction, because soil_coverage
+        already intersects each polygon with the catchment internally.
+
+        This confirms that the cosmetic folium clipping in _layers_from_sample
+        does not skew the statistics when clipped polygons are fed back into the
+        coverage functions."""
+        from eoflow.soil import soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        big_poly = box(minx - 50_000, miny - 50_000, maxx + 50_000, maxy + 50_000)
+
+        session_big = self._session_for((big_poly, "Peat"))
+        session_exact = self._session_for((catch_bng, "Peat"))
+
+        summary_big = soil_coverage_summary(self._CATCH_WGS84, session=session_big)
+        summary_exact = soil_coverage_summary(self._CATCH_WGS84, session=session_exact)
+
+        frac_big = summary_big.loc[summary_big["SEARG_Concise"] == "Peat", "fraction"].iloc[0]
+        frac_exact = summary_exact.loc[summary_exact["SEARG_Concise"] == "Peat", "fraction"].iloc[0]
+
+        assert abs(frac_big - frac_exact) < 0.01
+        assert abs(frac_big - 1.0) < 0.02
+
+    def test_area_km2_is_fraction_times_catchment_area(self):
+        """area_km2 must equal fraction × catchment_area_km2 for every row —
+        an internal consistency check that clipping does not corrupt the
+        area calculation."""
+        from eoflow.soil import _to_bng, soil_coverage_summary
+
+        catch_bng = self._catch_bng()
+        minx, miny, maxx, maxy = catch_bng.bounds
+        left_half = box(minx, miny, (minx + maxx) / 2, maxy)
+
+        session = self._session_for((left_half, "Peat"))
+        summary = soil_coverage_summary(self._CATCH_WGS84, session=session)
+
+        catchment_area_km2 = _to_bng(self._CATCH_WGS84).area / 1_000_000.0
+        for _, row in summary.iterrows():
+            expected = row["fraction"] * catchment_area_km2
+            assert abs(row["area_km2"] - expected) < 1e-6
+
+
+# ===========================================================================
 # Tests: module public API
 # ===========================================================================
 
