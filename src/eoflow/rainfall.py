@@ -1175,10 +1175,16 @@ def get_rainfall_for_polygon(
             return _empty_da
 
         # --- Step 5: Assemble xarray DataArray --------------------------------
+        # Convert timezone-aware datetimes to timezone-naive numpy datetime64
+        # so xarray can serialise the time coordinate to NetCDF.
+        time_coords = np.array(
+            [np.datetime64(t.replace(tzinfo=None), "ns") for t in valid_times],
+            dtype="datetime64[ns]",
+        )
         da = xr.DataArray(
             data=np.stack(slices, axis=0),  # (time, y, x)
             coords={
-                "time": valid_times,
+                "time": time_coords,
                 "y": northings,
                 "x": eastings,
             },
