@@ -33,13 +33,13 @@ class ColoredFormatter(logging.Formatter):
     """Formatter that adds colors to console output."""
 
     def format(self, record):
-        # Add color to the level name
-        levelname = record.levelname
-        if levelname in COLORS:
-            record.levelname = (
-                f"{COLORS[levelname]}{levelname}{COLORS['RESET']}"
-            )
-        return super().format(record)
+        original_levelname = record.levelname
+        if original_levelname in COLORS:
+            record.levelname = f"{COLORS[original_levelname]}{original_levelname}{COLORS['RESET']}"
+
+        formatted = super().format(record)
+        record.levelname = original_levelname  # restore
+        return formatted
 
 
 def setup_logging(
@@ -143,9 +143,7 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def set_level(
-    logger: Union[logging.Logger, str], level: Union[str, int]
-) -> None:
+def set_level(logger: Union[logging.Logger, str], level: Union[str, int]) -> None:
     """
     Set the logging level for a logger and all its handlers.
 
@@ -204,9 +202,7 @@ def add_file_handler(
     logger.addHandler(file_handler)
 
 
-def disable_library_logging(
-    library_name: str, level: int = logging.WARNING
-) -> None:
+def disable_library_logging(library_name: str, level: int = logging.WARNING) -> None:
     """
     Reduce logging noise from third-party libraries.
 
