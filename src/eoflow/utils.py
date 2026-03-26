@@ -7,6 +7,7 @@ from numpy.typing import ArrayLike
 from pyproj import Transformer
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
 
 # Lazily-initialised transformer: British National Grid → WGS 84
 _BNG_TO_WGS84: Transformer | None = None
