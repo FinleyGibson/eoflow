@@ -16,6 +16,7 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    overload,
 )
 
 import geopandas as gpd
@@ -75,8 +76,8 @@ class CatchmentLayers:
     """Container for all computed spatial layers associated with a catchment.
 
     Each attribute is populated by the corresponding ``compute_*`` method on
-    :class:`CatchmentSample` and is ``None`` until computed.  This dataclass
-    is intentionally kept separate from :class:`CatchmentSample` so that
+    :class:`Sample` and is ``None`` until computed.  This dataclass
+    is intentionally kept separate from :class:`Sample` so that
     computed results — some of which carry a temporal dimension — can be
     inspected, serialised, or passed around independently of the observation
     metadata.
@@ -85,33 +86,33 @@ class CatchmentLayers:
     ----------
     topography : xarray.DataArray or None
         Elevation in metres on a BNG (EPSG:27700) regular grid, shape
-        ``(y, x)``.  Populated by :meth:`CatchmentSample.compute_topography`.
+        ``(y, x)``.  Populated by :meth:`Sample.compute_topography`.
     slope : xarray.DataArray or None
         Terrain slope grid (units depend on the ``output`` kwarg supplied to
-        :meth:`CatchmentSample.compute_slope`, default degrees), shape
-        ``(y, x)``.  Populated by :meth:`CatchmentSample.compute_slope`.
+        :meth:`Sample.compute_slope`, default degrees), shape
+        ``(y, x)``.  Populated by :meth:`Sample.compute_slope`.
     aspect : xarray.DataArray or None
         Terrain aspect (slope direction) as a compass bearing clockwise from
         North, shape ``(y, x)``.  Units depend on the ``output`` kwarg
-        supplied to :meth:`CatchmentSample.compute_aspect` (default degrees,
-        range 0–360).  Populated by :meth:`CatchmentSample.compute_aspect`.
+        supplied to :meth:`Sample.compute_aspect` (default degrees,
+        range 0–360).  Populated by :meth:`Sample.compute_aspect`.
     soil_type : pandas.Series or None
         Fractional SEARG soil-group coverage within the catchment (values
         0–1, indexed by the 12 SEARG group names).  Values sum to ≤ 1 (the
         gap represents area not covered by any SEARG polygon, e.g. Scotland
-        or the sea).  Populated by :meth:`CatchmentSample.compute_soil_type`.
+        or the sea).  Populated by :meth:`Sample.compute_soil_type`.
     soil_polygons : geopandas.GeoDataFrame or None
         Raw SEARG soil polygons (in EPSG:27700) that intersect the catchment,
         as returned by :func:`eoflow.soil.query_soil_polygons`.  Key columns:
         ``SEARG_Concise``, ``MU_NAME``, ``BFI``, ``SPR``,
         ``SEARGDescription``.  Populated alongside :attr:`soil_type` by
-        :meth:`CatchmentSample.compute_soil_type`.
+        :meth:`Sample.compute_soil_type`.
     rainfall : xarray.DataArray or None
         Rainfall rate in mm/h with dimensions ``(time, y, x)`` on a BNG
         grid.  Unlike the static layers, this carries an explicit temporal
         dimension — use the ``start``/``end`` parameters of
-        :meth:`CatchmentSample.compute_rainfall` to control the time window.
-        Populated by :meth:`CatchmentSample.compute_rainfall`.
+        :meth:`Sample.compute_rainfall` to control the time window.
+        Populated by :meth:`Sample.compute_rainfall`.
     """
 
     topography: Optional["xarray.DataArray"] = field(default=None)
@@ -120,13 +121,29 @@ class CatchmentLayers:
     soil_type: Optional[pd.Series] = field(default=None)
     soil_polygons: Optional[gpd.GeoDataFrame] = field(default=None)
     rainfall: Optional["xarray.DataArray"] = field(default=None)
+    ndvi: Optional["xarray.DataArray"] = field(default=None)
+    """NDVI time series (t, y, x).  Populated by :meth:`~Sample.fetch_ndvi`."""
+    ndwi: Optional["xarray.DataArray"] = field(default=None)
+    """NDWI time series (t, y, x).  Populated by :meth:`~Sample.fetch_ndwi`."""
+    eo_bands: Optional["xarray.Dataset"] = field(default=None)
+    """Multi-band EO Dataset.  Populated by :meth:`~Sample.fetch_bands`."""
 
     @property
     def available(self) -> List[str]:
         """Names of layers that have been computed (non-``None``)."""
         return [
             name
-            for name in ("topography", "slope", "aspect", "soil_type", "soil_polygons", "rainfall")
+            for name in (
+                "topography",
+                "slope",
+                "aspect",
+                "soil_type",
+                "soil_polygons",
+                "rainfall",
+                "ndvi",
+                "ndwi",
+                "eo_bands",
+            )
             if getattr(self, name) is not None
         ]
 
@@ -138,11 +155,33 @@ class CatchmentLayers:
 
 
 # ---------------------------------------------------------------------------
-# CatchmentSample
+# Sample
 # ---------------------------------------------------------------------------
 
 
 class Sample:
+    """A single water-quality sampling point with optional catchment geometry.
+
+    Wraps one row from the GeoPackage produced by ``dataset_builder.py`` and
+    exposes typed property accessors for the most-used fields (site name,
+    notation, coordinates, measurement result, date …).  When catchment
+    delineation has been run the polygon is stored in :attr:`catchment` and
+    derived spatial helpers (:meth:`catchment_bbox`, :meth:`catchment_geojson`,
+    :meth:`catchment_area_km2`) become available.
+
+    Earth-observation layers (NDVI, NDWI, band composites) are fetched on
+    demand via the ``fetch_*`` family of methods and stored in
+    :attr:`layers`.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        A single row from the catchment GeoPackage.
+    catchment : shapely geometry or None
+        The delineated catchment polygon, or *None* if delineation failed or
+        has not been run yet.
+    """
+
     def __init__(self, row: pd.Series, catchment: Optional[BaseGeometry]) -> None:
         self._row = row.copy()
         self.catchment: Optional[BaseGeometry] = catchment
@@ -882,18 +921,9 @@ class Sample:
         ImportError
             If the ``openeo`` package is not installed.
         """
-        try:
-            import openeo  # type: ignore[import-untyped]
-        except ImportError as exc:
-            raise ImportError(
-                "The 'openeo' package is required for EO queries.  "
-                "Install it with:  uv add openeo  (or  pip install openeo)"
-            ) from exc
+        from eoflow import eo as _eo
 
-        conn = openeo.connect(backend)
-        if authenticate:
-            conn.authenticate_oidc()
-        return conn
+        return _eo.connect(backend, authenticate=authenticate)
 
     # ------------------------------------------------------------------
     # Core EO query
@@ -955,23 +985,23 @@ class Sample:
         start_str, end_str = self._resolve_dates(start_date, end_date, days_window)
         spatial_extent = self._spatial_extent_dict()
 
+        from eoflow import eo as _eo
+
         logger.info(
-            "Loading %s for site '%s' | bands=%s | %s → %s",
-            collection,
+            "Building band cube for site '%s' | bands=%s | %s → %s",
             self.site_name,
-            bands,
+            list(bands),
             start_str,
             end_str,
         )
-
-        cube = connection.load_collection(
-            collection,
-            spatial_extent=spatial_extent,
-            temporal_extent=[start_str, end_str],
-            bands=list(bands),
+        return _eo.build_band_cube(
+            connection,
+            spatial_extent,
+            (start_str, end_str),
+            bands,
+            collection=collection,
             max_cloud_cover=max_cloud_cover,
         )
-        return cube
 
     # ------------------------------------------------------------------
     # Named spectral index helpers
@@ -1064,19 +1094,9 @@ class Sample:
             collection=collection,
             max_cloud_cover=max_cloud_cover,
         )
-        # openEO has no built-in ndwi process; compute with band_math
-        green = cube.filter_bands([green_band]).rename_labels(dimension="bands", target=["green"])
-        nir = cube.filter_bands([nir_band]).rename_labels(dimension="bands", target=["nir"])
-        merged = green.merge_cubes(nir)
-        ndwi = merged.reduce_dimension(
-            dimension="bands",
-            reducer=lambda data: (
-                (data.array_element(0) - data.array_element(1))
-                / (data.array_element(0) + data.array_element(1))
-            ),
-        )
-        logger.info("NDWI process applied (green=%s, nir=%s)", green_band, nir_band)
-        return ndwi
+        from eoflow import eo as _eo
+
+        return _eo.compute_ndwi(cube, green_band=green_band, nir_band=nir_band)
 
     def query_index(
         self,
@@ -1204,18 +1224,9 @@ class Sample:
             collection=collection,
             max_cloud_cover=max_cloud_cover,
         )
-        a = cube.filter_bands([band_a]).rename_labels(dimension="bands", target=["a"])
-        b = cube.filter_bands([band_b]).rename_labels(dimension="bands", target=["b"])
-        merged = a.merge_cubes(b)
-        result = merged.reduce_dimension(
-            dimension="bands",
-            reducer=lambda data: (
-                (data.array_element(0) - data.array_element(1))
-                / (data.array_element(0) + data.array_element(1))
-            ),
-        )
-        logger.info("%s applied (%s, %s)", label, band_a, band_b)
-        return result
+        from eoflow import eo as _eo
+
+        return _eo.compute_normalised_difference(cube, band_a, band_b, label)
 
     def _query_evi(
         self,
@@ -1227,6 +1238,8 @@ class Sample:
         max_cloud_cover: int,
     ) -> "openeo.DataCube":
         """EVI = 2.5 * (NIR − Red) / (NIR + 6*Red − 7.5*Blue + 1)."""
+        from eoflow import eo as _eo
+
         nir_b, red_b, blue_b = "B08", "B04", "B02"
         cube = self.query_bands(
             connection,
@@ -1237,25 +1250,337 @@ class Sample:
             collection=collection,
             max_cloud_cover=max_cloud_cover,
         )
-        nir = cube.filter_bands([nir_b]).rename_labels(dimension="bands", target=["nir"])
-        red = cube.filter_bands([red_b]).rename_labels(dimension="bands", target=["red"])
-        blue = cube.filter_bands([blue_b]).rename_labels(dimension="bands", target=["blue"])
-        merged = nir.merge_cubes(red).merge_cubes(blue)
+        return _eo.compute_evi(cube, nir_band=nir_b, red_band=red_b, blue_band=blue_b)
 
-        def _evi_reducer(data):
-            nir_v = data.array_element(0)
-            red_v = data.array_element(1)
-            blue_v = data.array_element(2)
-            # S2 L2A reflectance is scaled ×10000.  Normalised-difference indices
-            # (NDVI, NDWI, …) are unaffected because the scale cancels in the
-            # ratio, but EVI has an absolute "+1" term in the denominator that
-            # must be expressed in the same units (i.e. +10000 for scaled data).
-            # Equivalent to the standard formula applied to [0, 1] reflectance.
-            return 2.5 * (nir_v - red_v) / (nir_v + 6 * red_v - 7.5 * blue_v + 10000)
+    # ------------------------------------------------------------------
+    # Materialising EO queries (download + store on self.layers)
+    # ------------------------------------------------------------------
 
-        evi = merged.reduce_dimension(dimension="bands", reducer=_evi_reducer)
-        logger.info("EVI applied (nir=%s, red=%s, blue=%s)", nir_b, red_b, blue_b)
-        return evi
+    def fetch_bands(
+        self,
+        connection: "openeo.Connection",
+        bands: Sequence[str],
+        start_date: Union[str, date, None] = None,
+        end_date: Union[str, date, None] = None,
+        *,
+        days_window: Optional[int] = None,
+        collection: str = SENTINEL2_COLLECTION,
+        max_cloud_cover: int = 85,
+    ) -> "xarray.Dataset":
+        """Download Sentinel-2 band data for the catchment and store it.
+
+        Builds the openEO datacube via :meth:`query_bands`, executes it
+        synchronously, and stores the resulting
+        :class:`xarray.Dataset` in :attr:`layers.eo_bands`.
+
+        Parameters
+        ----------
+        connection : openeo.Connection
+            An authenticated openEO connection (see :meth:`connect_openeo`).
+        bands : sequence of str
+            Band names to download, e.g. ``["B04", "B08"]``.
+        start_date, end_date : str or date, optional
+            Temporal extent as ISO-8601 strings or :class:`datetime.date`
+            objects.  If both are *None* and *days_window* is also *None*,
+            defaults to a 30-day window around the sample date.
+        days_window : int, optional
+            Compute dates symmetrically as ``sample.date ± days_window`` days.
+        collection : str
+            openEO collection ID.  Defaults to ``SENTINEL2_L2A``.
+        max_cloud_cover : int
+            Maximum cloud cover percentage (0–100).
+
+        Returns
+        -------
+        xarray.Dataset
+            The downloaded dataset, also stored as ``self.layers.eo_bands``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no catchment polygon, or if dates cannot be
+            determined.
+        """
+        from eoflow import eo as _eo
+
+        cube = self.query_bands(
+            connection,
+            bands=bands,
+            start_date=start_date,
+            end_date=end_date,
+            days_window=days_window,
+            collection=collection,
+            max_cloud_cover=max_cloud_cover,
+        )
+        logger.info(
+            "Downloading band data for site '%s' (bands=%s) …",
+            self.site_name,
+            list(bands),
+        )
+        ds = _eo.download_cube_as_xarray(cube)
+        self.layers.eo_bands = ds
+        logger.info(
+            "EO bands stored for site '%s': vars=%s",
+            self.site_name,
+            list(ds.data_vars),
+        )
+        return ds
+
+    def fetch_ndvi(
+        self,
+        connection: "openeo.Connection",
+        start_date: Union[str, date, None] = None,
+        end_date: Union[str, date, None] = None,
+        *,
+        days_window: Optional[int] = None,
+        nir_band: str = "B08",
+        red_band: str = "B04",
+        collection: str = SENTINEL2_COLLECTION,
+        max_cloud_cover: int = 85,
+    ) -> "xarray.DataArray":
+        """Download NDVI for the catchment and store it in ``self.layers.ndvi``.
+
+        Builds the NDVI datacube via :meth:`query_ndvi`, executes it
+        synchronously, and stores the single-band result as a
+        :class:`xarray.DataArray` with dimensions ``(t, y, x)`` (exact
+        dimension names depend on the backend).
+
+        Parameters
+        ----------
+        connection : openeo.Connection
+            An authenticated openEO connection (see :meth:`connect_openeo`).
+        start_date, end_date : str or date, optional
+            Temporal extent.  Defaults to a 30-day window around the sample
+            date when both are *None*.
+        days_window : int, optional
+            Compute dates symmetrically as ``sample.date ± days_window`` days.
+        nir_band : str
+            NIR band name.  Default ``"B08"`` (Sentinel-2 10 m).
+        red_band : str
+            Red band name.  Default ``"B04"`` (Sentinel-2 10 m).
+        collection : str
+        max_cloud_cover : int
+
+        Returns
+        -------
+        xarray.DataArray
+            NDVI values in [−1, 1], also stored as ``self.layers.ndvi``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no catchment polygon, or if dates cannot be
+            determined.
+
+        Examples
+        --------
+        ::
+
+            conn = Sample.connect_openeo()
+            ndvi = sample.fetch_ndvi(conn, start_date="2024-03-01", end_date="2024-04-30")
+            ndvi.mean().item()   # mean NDVI over the catchment/period
+        """
+        from eoflow import eo as _eo
+
+        cube = self.query_ndvi(
+            connection,
+            start_date=start_date,
+            end_date=end_date,
+            days_window=days_window,
+            nir_band=nir_band,
+            red_band=red_band,
+            collection=collection,
+            max_cloud_cover=max_cloud_cover,
+        )
+        logger.info("Downloading NDVI for site '%s' …", self.site_name)
+        ds = _eo.download_cube_as_xarray(cube)
+        da = _eo.extract_dataarray(ds, name="ndvi")
+        self.layers.ndvi = da
+        logger.info(
+            "NDVI stored for site '%s': dims=%s",
+            self.site_name,
+            da.dims,
+        )
+        return da
+
+    def fetch_ndwi(
+        self,
+        connection: "openeo.Connection",
+        start_date: Union[str, date, None] = None,
+        end_date: Union[str, date, None] = None,
+        *,
+        days_window: Optional[int] = None,
+        green_band: str = "B03",
+        nir_band: str = "B08",
+        collection: str = SENTINEL2_COLLECTION,
+        max_cloud_cover: int = 85,
+    ) -> "xarray.DataArray":
+        """Download NDWI for the catchment and store it in ``self.layers.ndwi``.
+
+        Builds the NDWI datacube via :meth:`query_ndwi`, executes it
+        synchronously, and stores the single-band result as a
+        :class:`xarray.DataArray`.
+
+        Parameters
+        ----------
+        connection : openeo.Connection
+            An authenticated openEO connection (see :meth:`connect_openeo`).
+        start_date, end_date : str or date, optional
+            Temporal extent.  Defaults to a 30-day window around the sample
+            date when both are *None*.
+        days_window : int, optional
+            Compute dates symmetrically as ``sample.date ± days_window`` days.
+        green_band : str
+            Green band name.  Default ``"B03"`` (Sentinel-2 10 m).
+        nir_band : str
+            NIR band name.  Default ``"B08"`` (Sentinel-2 10 m).
+        collection : str
+        max_cloud_cover : int
+
+        Returns
+        -------
+        xarray.DataArray
+            NDWI values in [−1, 1], also stored as ``self.layers.ndwi``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no catchment polygon, or if dates cannot be
+            determined.
+
+        Examples
+        --------
+        ::
+
+            conn = Sample.connect_openeo()
+            ndwi = sample.fetch_ndwi(conn, start_date="2024-03-01", end_date="2024-04-30")
+        """
+        from eoflow import eo as _eo
+
+        cube = self.query_ndwi(
+            connection,
+            start_date=start_date,
+            end_date=end_date,
+            days_window=days_window,
+            green_band=green_band,
+            nir_band=nir_band,
+            collection=collection,
+            max_cloud_cover=max_cloud_cover,
+        )
+        logger.info("Downloading NDWI for site '%s' …", self.site_name)
+        ds = _eo.download_cube_as_xarray(cube)
+        da = _eo.extract_dataarray(ds, name="ndwi")
+        self.layers.ndwi = da
+        logger.info(
+            "NDWI stored for site '%s': dims=%s",
+            self.site_name,
+            da.dims,
+        )
+        return da
+
+    def fetch_index(
+        self,
+        connection: "openeo.Connection",
+        index: str,
+        start_date: Union[str, date, None] = None,
+        end_date: Union[str, date, None] = None,
+        *,
+        days_window: Optional[int] = None,
+        collection: str = SENTINEL2_COLLECTION,
+        max_cloud_cover: int = 85,
+    ) -> "xarray.DataArray":
+        """Download a named spectral index and store it on ``self.layers``.
+
+        This is a dispatch wrapper around :meth:`fetch_ndvi`,
+        :meth:`fetch_ndwi`, and the lower-level :func:`eoflow.eo.build_index_cube`
+        + :func:`eoflow.eo.download_cube_as_xarray` pipeline for other indices.
+
+        Results for NDVI and NDWI are stored in the dedicated
+        ``self.layers.ndvi`` / ``self.layers.ndwi`` slots.  For all other
+        supported indices (MNDWI, NDRE, EVI) the DataArray is returned but
+        not automatically persisted to a named slot — callers may assign it
+        manually (e.g. ``sample.layers.eo_bands = ...``).
+
+        Supported index names (case-insensitive):
+        ``NDVI``, ``NDWI``, ``MNDWI``, ``NDRE``, ``EVI``.
+
+        Parameters
+        ----------
+        connection : openeo.Connection
+            An authenticated openEO connection (see :meth:`connect_openeo`).
+        index : str
+            Spectral index name (see above).
+        start_date, end_date : str or date, optional
+            Temporal extent.  Defaults to a 30-day window around the sample
+            date when both are *None*.
+        days_window : int, optional
+            Compute dates symmetrically as ``sample.date ± days_window`` days.
+        collection : str
+        max_cloud_cover : int
+
+        Returns
+        -------
+        xarray.DataArray
+            Index values, also stored on ``self.layers`` for NDVI/NDWI.
+
+        Raises
+        ------
+        ValueError
+            If *index* is not one of the supported names, the sample has no
+            catchment polygon, or dates cannot be determined.
+
+        Examples
+        --------
+        ::
+
+            conn = Sample.connect_openeo()
+            ndvi = sample.fetch_index(conn, "NDVI", days_window=30)
+            ndwi = sample.fetch_index(conn, "NDWI", days_window=30)
+        """
+        idx = index.upper()
+
+        if idx == "NDVI":
+            return self.fetch_ndvi(
+                connection,
+                start_date=start_date,
+                end_date=end_date,
+                days_window=days_window,
+                collection=collection,
+                max_cloud_cover=max_cloud_cover,
+            )
+
+        if idx == "NDWI":
+            return self.fetch_ndwi(
+                connection,
+                start_date=start_date,
+                end_date=end_date,
+                days_window=days_window,
+                collection=collection,
+                max_cloud_cover=max_cloud_cover,
+            )
+
+        # For MNDWI / NDRE / EVI — build and download via eo module
+        from eoflow import eo as _eo
+
+        cube = self.query_index(
+            connection,
+            index=index,
+            start_date=start_date,
+            end_date=end_date,
+            days_window=days_window,
+            collection=collection,
+            max_cloud_cover=max_cloud_cover,
+        )
+        logger.info("Downloading %s for site '%s' …", idx, self.site_name)
+        ds = _eo.download_cube_as_xarray(cube)
+        da = _eo.extract_dataarray(ds, name=idx.lower())
+        logger.info(
+            "%s downloaded for site '%s': dims=%s",
+            idx,
+            self.site_name,
+            da.dims,
+        )
+        return da
 
     def _resolve_dates(
         self,
@@ -1340,7 +1665,7 @@ class Sample:
         root.mkdir(parents=True, exist_ok=True)
 
         # 1. Observation-row metadata
-        (root / "metadata.json").write_text(self._row.to_json(), encoding="utf-8")
+        (root / "metadata.json").write_text(self._row.to_json() or "", encoding="utf-8")
         logger.debug("Saved metadata to %s", root / "metadata.json")
 
         # 2. Catchment geometry
@@ -1381,7 +1706,7 @@ class Sample:
         if self.layers.soil_type is not None:
             layers_dir.mkdir(parents=True, exist_ok=True)
             (layers_dir / "soil_type.json").write_text(
-                self.layers.soil_type.to_json(), encoding="utf-8"
+                self.layers.soil_type.to_json() or "", encoding="utf-8"
             )
             logger.debug("Saved soil_type layer to %s", layers_dir / "soil_type.json")
 
@@ -1399,6 +1724,33 @@ class Sample:
                 da = da.rename("rainfall")
             da.to_netcdf(layers_dir / "rainfall.nc")
             logger.debug("Saved rainfall layer to %s", layers_dir / "rainfall.nc")
+
+        if self.layers.ndvi is not None and self.layers.ndvi.size > 0:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.ndvi
+            if da.name is None:
+                da = da.rename("ndvi")
+            da.to_netcdf(layers_dir / "ndvi.nc")
+            logger.debug("Saved NDVI layer to %s", layers_dir / "ndvi.nc")
+        elif self.layers.ndvi is not None:
+            logger.warning("Skipping save of empty NDVI DataArray (size=0)")
+
+        if self.layers.ndwi is not None and self.layers.ndwi.size > 0:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.ndwi
+            if da.name is None:
+                da = da.rename("ndwi")
+            da.to_netcdf(layers_dir / "ndwi.nc")
+            logger.debug("Saved NDWI layer to %s", layers_dir / "ndwi.nc")
+        elif self.layers.ndwi is not None:
+            logger.warning("Skipping save of empty NDWI DataArray (size=0)")
+
+        if self.layers.eo_bands is not None and len(self.layers.eo_bands.data_vars) > 0:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            self.layers.eo_bands.to_netcdf(layers_dir / "eo_bands.nc")
+            logger.debug("Saved EO bands to %s", layers_dir / "eo_bands.nc")
+        elif self.layers.eo_bands is not None:
+            logger.warning("Skipping save of empty EO bands Dataset (no data variables)")
 
         logger.info("Sample '%s' saved to %s", self.id, root)
 
@@ -1436,7 +1788,12 @@ class Sample:
             )
 
         # 1. Observation-row metadata
-        row = pd.read_json(metadata_path, typ="series", dtype=False, convert_dates=False)
+        row = pd.read_json(
+            metadata_path,
+            typ="series",
+            dtype=False,  # type: ignore[arg-type]
+            convert_dates=False,
+        )
         logger.debug("Loaded metadata from %s", metadata_path)
 
         # 2. Catchment geometry
@@ -1468,7 +1825,11 @@ class Sample:
 
             soil_path = layers_dir / "soil_type.json"
             if soil_path.exists():
-                sample.layers.soil_type = pd.read_json(soil_path, typ="series", dtype=False)
+                sample.layers.soil_type = pd.read_json(
+                    soil_path,
+                    typ="series",
+                    dtype=False,  # type: ignore[arg-type]
+                )
                 logger.debug("Loaded soil_type layer from %s", soil_path)
 
             soil_polygons_path = layers_dir / "soil_polygons.geojson"
@@ -1481,6 +1842,32 @@ class Sample:
                 sample.layers.rainfall = xarray.open_dataarray(rainfall_path).load()
                 logger.debug("Loaded rainfall layer from %s", rainfall_path)
 
+            ndvi_path = layers_dir / "ndvi.nc"
+            if ndvi_path.exists():
+                try:
+                    sample.layers.ndvi = xarray.open_dataarray(ndvi_path).load()
+                    logger.debug("Loaded NDVI layer from %s", ndvi_path)
+                except ValueError as exc:
+                    logger.warning("Skipping empty/corrupt NDVI file %s: %s", ndvi_path, exc)
+
+            ndwi_path = layers_dir / "ndwi.nc"
+            if ndwi_path.exists():
+                try:
+                    sample.layers.ndwi = xarray.open_dataarray(ndwi_path).load()
+                    logger.debug("Loaded NDWI layer from %s", ndwi_path)
+                except ValueError as exc:
+                    logger.warning("Skipping empty/corrupt NDWI file %s: %s", ndwi_path, exc)
+
+            eo_bands_path = layers_dir / "eo_bands.nc"
+            if eo_bands_path.exists():
+                try:
+                    sample.layers.eo_bands = xarray.open_dataset(eo_bands_path).load()
+                    logger.debug("Loaded EO bands from %s", eo_bands_path)
+                except ValueError as exc:
+                    logger.warning(
+                        "Skipping empty/corrupt EO bands file %s: %s", eo_bands_path, exc
+                    )
+
         logger.info("Sample '%s' loaded from %s", sample.id, root)
         return sample
 
@@ -1490,7 +1877,7 @@ class Sample:
 
     def __repr__(self) -> str:
         return (
-            f"CatchmentSample("
+            f"Sample("
             f"id={self.id!r}, "
             f"site={self.site_name!r}, "
             f"date={self.date!r}, "
@@ -1503,7 +1890,7 @@ class Sample:
         area = self.catchment_area_km2()
         area_str = f"{area:.3f} km²" if area is not None else "n/a"
         return (
-            f"CatchmentSample\n"
+            f"Sample\n"
             f"  Site        : {self.site_name}\n"
             f"  Notation    : {self.notation}\n"
             f"  Date        : {self.date}\n"
@@ -1514,9 +1901,9 @@ class Sample:
         )
 
 
-# Public alias — the class was originally prototyped as "Sample" but all
-# external code (notebooks, type hints, from_gpkg) refers to it as
-# "CatchmentSample".  Both names are exported so either works.
+#: Deprecated backward-compatibility alias.  :class:`Sample` is the
+#: canonical name.  ``CatchmentSample`` will be removed in a future
+#: release — update any existing code to use :class:`Sample` directly.
 CatchmentSample = Sample
 
 # ---------------------------------------------------------------------------
@@ -1525,14 +1912,14 @@ CatchmentSample = Sample
 
 
 class CatchmentDataset:
-    """A collection of :class:`CatchmentSample` objects.
+    """A collection of :class:`Sample` objects.
 
     Load from the GeoPackage produced by ``dataset_builder.py`` with
     :meth:`from_gpkg`, then iterate, filter, and query EO data.
 
     Parameters
     ----------
-    samples : list of CatchmentSample
+    samples : list of Sample
         The samples in the dataset.
     source_path : Path or None
         Path to the originating GeoPackage (informational).
@@ -1540,10 +1927,10 @@ class CatchmentDataset:
 
     def __init__(
         self,
-        samples: List[CatchmentSample],
+        samples: List[Sample],
         source_path: Optional[Path] = None,
     ) -> None:
-        self._samples: List[CatchmentSample] = samples
+        self._samples: List[Sample] = samples
         self.source_path: Optional[Path] = source_path
 
     # ------------------------------------------------------------------
@@ -1610,7 +1997,7 @@ class CatchmentDataset:
             gdf = gdf[gdf[_COL_STATUS] == "ok"].copy()
             logger.info("only_delineated=True: kept %d / %d rows", len(gdf), before)
 
-        samples: List[CatchmentSample] = []
+        samples: List[Sample] = []
         for _, row in gdf.iterrows():
             geom = row.geometry
             if geom is not None and not (isinstance(geom, float) and math.isnan(geom)):
@@ -1633,7 +2020,7 @@ class CatchmentDataset:
                     except Exception:
                         pass
 
-            samples.append(CatchmentSample(row=row, catchment=catchment))  # type: ignore[arg-type]
+            samples.append(Sample(row=row, catchment=catchment))  # type: ignore[arg-type]
 
         n_with = sum(1 for s in samples if s.has_catchment)
         logger.info(
@@ -1665,7 +2052,7 @@ class CatchmentDataset:
         for _, row in gdf.iterrows():
             geom = row.geometry
             catchment = geom if isinstance(geom, Polygon) else None
-            samples.append(CatchmentSample(row=row, catchment=catchment))
+            samples.append(Sample(row=row, catchment=catchment))
 
         return cls(samples, source_path=source_path)
 
@@ -1705,7 +2092,7 @@ class CatchmentDataset:
         after, before : str or date, optional
             Keep only samples with ``date >= after`` and/or ``date <= before``.
         """
-        result: List[CatchmentSample] = []
+        result: List[Sample] = []
         after_date = _to_date_obj(after) if after is not None else None
         before_date = _to_date_obj(before) if before is not None else None
 
@@ -1748,7 +2135,7 @@ class CatchmentDataset:
         ----------
         connection : openeo.Connection
         days_window : int
-            Passed to each :meth:`CatchmentSample.query_ndvi` call.
+            Passed to each :meth:`Sample.query_ndvi` call.
         output_dir : Path, optional
             If provided, immediately download each cube as a GeoTIFF into
             this directory (``<notation>_ndvi.tif``).
@@ -1907,10 +2294,16 @@ class CatchmentDataset:
     def __len__(self) -> int:
         return len(self._samples)
 
-    def __iter__(self) -> Iterator[CatchmentSample]:
+    def __iter__(self) -> Iterator[Sample]:
         return iter(self._samples)
 
-    def __getitem__(self, idx: Union[int, slice]) -> Union[CatchmentSample, "CatchmentDataset"]:
+    @overload
+    def __getitem__(self, idx: int) -> Sample: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> "CatchmentDataset": ...
+
+    def __getitem__(self, idx: Union[int, slice]) -> Union[Sample, "CatchmentDataset"]:
         if isinstance(idx, slice):
             return CatchmentDataset(self._samples[idx], source_path=self.source_path)
         return self._samples[idx]

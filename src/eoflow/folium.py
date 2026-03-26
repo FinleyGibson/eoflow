@@ -13,7 +13,7 @@ make_raster_overlay_from_tif
 legend_html          Generate an HTML colour-bar legend element.
 add_area             Add an area boundary polygon (and optional DEM raster)
                      to a Folium map.
-add_sample           Add a ``CatchmentSample`` — catchment polygon, sample
+add_sample           Add a ``Sample`` — catchment polygon, sample
                      site, pour point, and optional raster overlays — to a
                      Folium map.
 
@@ -924,7 +924,7 @@ def add_sample(
     zoom_start: int | None = None,
     clip_soil_to_catchment: bool = True,
 ) -> folium.Map:
-    """Add a :class:`~eoflow.samples.CatchmentSample` to a Folium map.
+    """Add a :class:`~eoflow.samples.Sample` to a Folium map.
 
     Renders the following elements (each toggleable):
 
@@ -941,7 +941,7 @@ def add_sample(
     Parameters
     ----------
     sample:
-        A :class:`~eoflow.samples.CatchmentSample` instance.
+        A :class:`~eoflow.samples.Sample` instance.
     f_map:
         Existing ``folium.Map`` to add layers to.  When ``None`` a new map
         is created centred on the catchment bounding-box midpoint, using
@@ -1262,6 +1262,212 @@ def _make_soil_featuregroup(gdf, name: str) -> folium.FeatureGroup:
     return fg
 
 
+def _make_index_overlay(
+    da: "xr.DataArray",
+    *,
+    cmap: str,
+    label: str,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    alpha: float | None = None,
+    fallback_bbox: tuple[float, float, float, float] | None = None,
+) -> "folium.raster_layers.ImageOverlay | None":
+    """Create a Folium :class:`~folium.raster_layers.ImageOverlay` from an
+    EO index DataArray (e.g. NDVI, NDWI).
+
+    Collapses the time dimension to a temporal mean, determines the correct
+    WGS-84 bounding box from the DataArray's coordinate metadata (with a
+    fallback to *fallback_bbox*), and returns a ready-to-use overlay.
+
+    Unlike :func:`make_raster_overlay` this function is not restricted to
+    EPSG:27700 (BNG) input — it tries three strategies in order to derive
+    WGS-84 bounds from whatever CRS the openEO backend used:
+
+    1. **rioxarray** — if the ``rioxarray`` extension is installed and the
+       DataArray carries CRS metadata, the native bounds are reprojected
+       via ``pyproj``.
+    2. **Degree-range heuristic** — if the ``y``/``lat`` coordinates are
+       already in the range [−90, 90] they are treated as decimal degrees.
+    3. **Fallback bbox** — the caller-supplied *fallback_bbox* tuple, e.g.
+       ``sample.catchment_bbox()``.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        Index array, possibly with a time dimension (``"t"`` or ``"time"``).
+        All remaining dimensions are assumed to be spatial (``y``/``x`` or
+        ``lat``/``lon``).
+    cmap : str
+        Matplotlib colourmap name (e.g. ``"RdYlGn"`` for NDVI).
+    label : str
+        Layer name shown in the ``folium.LayerControl``.
+    vmin, vmax : float
+        Colour-scale limits.  Default is −1 to 1, appropriate for any
+        normalised-difference index.
+    alpha : float, optional
+        Overlay opacity (0–1).  Defaults to ``raster.alpha`` in config.
+    fallback_bbox : (W, S, E, N) tuple, optional
+        WGS-84 bounding box used when automatic CRS detection fails.
+        Pass ``sample.catchment_bbox()`` to fall back to the catchment
+        extent when rioxarray is unavailable.
+
+    Returns
+    -------
+    folium.raster_layers.ImageOverlay or None
+        ``None`` when the array cannot be rendered (wrong dimensionality
+        after squeezing, or bounds cannot be determined by any strategy).
+    """
+    if alpha is None:
+        alpha = _get("raster", "alpha", 0.70)
+
+    # ── 0. Coerce to float32 ─────────────────────────────────────────────────
+    # Some openEO backends (e.g. CDSE / Terrascope) produce object-dtype
+    # arrays where NaN is encoded as b'' (empty bytestring).  This survives
+    # the NetCDF checkpoint round-trip and makes any numeric reduction crash
+    # with "could not convert string to float: b''".
+    if not np.issubdtype(da.dtype, np.floating):
+        raw = da.values
+        if raw.dtype.kind == "O":
+            # Vectorised element-wise conversion: b''/''/ None → NaN, rest → float.
+            # np.float32(b'0.75') works; Python's float(b'0.75') raises ValueError.
+            def _to_f(v: object) -> float:
+                if v in (b"", b"nan", "", None):
+                    return np.nan
+                try:
+                    return float(np.float32(v))  # type: ignore[arg-type]
+                except (ValueError, TypeError):
+                    return np.nan
+
+            da = da.copy(data=np.vectorize(_to_f)(raw).astype(np.float32))
+        else:
+            try:
+                da = da.astype(np.float32)
+            except (ValueError, TypeError):
+                return None
+
+    # ── 0.5. Drop spurious 'variable' dimension ──────────────────────────────
+    # The CDSE / Terrascope openEO backend writes a scalar 'crs' metadata
+    # variable alongside the real data variable.  extract_dataarray stacks
+    # them into a 'variable' dimension ['crs', 'var'].  Pre-existing
+    # checkpoints may still carry this dim; select the first non-CRS slice
+    # (or fall back to isel(0)) before any reduction.
+    if "variable" in da.dims:
+        _META_NAMES = {"crs", "spatial_ref", "crs_wkt"}
+        if "variable" in da.coords:
+            _data_slices = [
+                str(v) for v in da.coords["variable"].values if str(v) not in _META_NAMES
+            ]
+            da = (
+                da.sel(variable=_data_slices[0], drop=True)
+                if _data_slices
+                else da.isel(variable=0, drop=True)
+            )
+        else:
+            da = da.isel(variable=0, drop=True)
+
+    # ── 1. Collapse the time dimension to a temporal mean ────────────────────
+    for time_dim in ("t", "time"):
+        if time_dim in da.dims:
+            da = da.mean(dim=time_dim, skipna=True)
+            break
+
+    # ── 2. Squeeze any remaining length-1 dimensions ─────────────────────────
+    da = da.squeeze(drop=True)
+    if da.ndim != 2:
+        return None
+
+    # ── 3. Determine WGS-84 bounding box ─────────────────────────────────────
+    lat_min = lat_max = lon_min = lon_max = None
+
+    # Strategy A: rioxarray CRS metadata + pyproj reprojection
+    try:
+        import rioxarray  # noqa: F401
+        from pyproj import Transformer
+
+        if da.rio.crs is not None:
+            epsg = da.rio.crs.to_epsg()
+            if epsg is not None:
+                w, s, e, n = da.rio.bounds()  # bounds in native CRS
+                tr = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+                xs_c = np.array([w, e, w, e])
+                ys_c = np.array([s, s, n, n])
+                lons, lats = tr.transform(xs_c, ys_c)
+                lat_min, lat_max = float(lats.min()), float(lats.max())
+                lon_min, lon_max = float(lons.min()), float(lons.max())
+    except Exception:
+        pass
+
+    # Strategy B: coordinate values already in degree range → treat as WGS-84
+    if lat_min is None:
+        for y_name in ("latitude", "lat", "y"):
+            if y_name in da.coords:
+                y_vals = da.coords[y_name].values.ravel()
+                if float(y_vals.min()) >= -90.0 and float(y_vals.max()) <= 90.0:
+                    lat_min, lat_max = float(y_vals.min()), float(y_vals.max())
+                    break
+        for x_name in ("longitude", "lon", "x"):
+            if x_name in da.coords:
+                x_vals = da.coords[x_name].values.ravel()
+                if float(x_vals.min()) >= -180.0 and float(x_vals.max()) <= 360.0:
+                    lon_min, lon_max = float(x_vals.min()), float(x_vals.max())
+                    break
+
+    # Strategy C: caller-supplied fallback bbox (e.g. catchment WGS-84 bbox)
+    if lat_min is None and fallback_bbox is not None:
+        lon_min, lat_min, lon_max, lat_max = fallback_bbox  # (W, S, E, N)
+
+    if lat_min is None or lon_min is None or lat_max is None or lon_max is None:
+        return None
+
+    # Narrow to plain floats so type-checkers (and ImageOverlay) are satisfied.
+    _lat_min: float = float(lat_min)
+    _lat_max: float = float(lat_max)
+    _lon_min: float = float(lon_min)
+    _lon_max: float = float(lon_max)
+    _alpha: float = float(alpha) if alpha is not None else float(_get("raster", "alpha", 0.70))
+
+    # ── 4. Extract array values and ensure north-up orientation ──────────────
+    data = da.values.astype(float)
+
+    # Auto-adjust colour limits when the data falls outside [vmin, vmax].
+    # CDSE / Terrascope may return unscaled values (e.g. NDVI × 1000) rather
+    # than the conventional −1 … 1 range.  Use 2nd/98th percentiles rather
+    # than absolute min/max so that a handful of outlier pixels cannot
+    # compress the entire real distribution into a single colour band.
+    finite = data[np.isfinite(data)]
+    if finite.size > 0:
+        _dmin, _dmax = float(finite.min()), float(finite.max())
+        if _dmin < vmin or _dmax > vmax:
+            vmin = float(np.percentile(finite, 2))
+            vmax = float(np.percentile(finite, 98))
+    # openEO backends often store y ascending (south→north).  Folium expects
+    # row 0 at the top (north) edge of the bounds, so flip when necessary.
+    for y_name in ("latitude", "lat", "y"):
+        if y_name in da.dims and y_name in da.coords:
+            y_vals = da.coords[y_name].values
+            if len(y_vals) > 1 and float(y_vals[0]) < float(y_vals[-1]):
+                data = data[::-1, :]
+            break
+
+    # ── 5. Colourise → RGBA → base64 PNG ─────────────────────────────────────
+    norm = _MplNormalize(vmin=vmin, vmax=vmax)
+    rgba = (plt.get_cmap(cmap)(norm(data)) * 255).astype(np.uint8)
+    # Make NaN pixels fully transparent
+    rgba[~np.isfinite(da.values.astype(float)), 3] = 0
+
+    buf = io.BytesIO()
+    plt.imsave(buf, rgba, format="png")
+    buf.seek(0)
+    img_url = "data:image/png;base64," + base64.b64encode(buf.read()).decode()
+
+    return folium.raster_layers.ImageOverlay(
+        image=img_url,
+        bounds=[[_lat_min, _lon_min], [_lat_max, _lon_max]],
+        opacity=_alpha,
+        name=label,
+    )
+
+
 def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
     """Build a ``raster_layers`` dict from ``sample.layers``.
 
@@ -1282,7 +1488,7 @@ def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
     Parameters
     ----------
     sample:
-        A :class:`~eoflow.samples.CatchmentSample` with a populated
+        A :class:`~eoflow.samples.Sample` with a populated
         ``.layers`` attribute.
     clip_soil:
         When ``True`` (default) the soil polygons GeoDataFrame is
@@ -1345,11 +1551,36 @@ def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
 
     if getattr(sl, "rainfall", None) is not None:
         # Collapse the time dimension before rendering
-        rain_mean = sl.rainfall.mean(dim="time")
+        rain_mean = sl.rainfall.mean(dim="time", skipna=True)
         layers["Rainfall (mm/h, time-mean)"] = (
             rain_mean,
             _get("colormaps", "rainfall", "Blues"),
         )
+
+    # ── EO spectral indices ───────────────────────────────────────────────────
+    # NDVI and NDWI are time-series DataArrays from openEO (not in BNG), so
+    # they are handled by _make_index_overlay rather than make_raster_overlay.
+    _catchment_bbox = sample.catchment_bbox() if hasattr(sample, "catchment_bbox") else None
+
+    if getattr(sl, "ndvi", None) is not None:
+        overlay = _make_index_overlay(
+            sl.ndvi,
+            cmap=_get("colormaps", "ndvi", "RdYlGn"),
+            label="NDVI (mean)",
+            fallback_bbox=_catchment_bbox,
+        )
+        if overlay is not None:
+            layers["NDVI (mean)"] = overlay
+
+    if getattr(sl, "ndwi", None) is not None:
+        overlay = _make_index_overlay(
+            sl.ndwi,
+            cmap=_get("colormaps", "ndwi", "RdBu"),
+            label="NDWI (mean)",
+            fallback_bbox=_catchment_bbox,
+        )
+        if overlay is not None:
+            layers["NDWI (mean)"] = overlay
 
     return layers
 

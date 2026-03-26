@@ -35,7 +35,7 @@ from eoflow.samples import (
     OPENEO_BACKEND,
     SENTINEL2_COLLECTION,
     CatchmentDataset,
-    CatchmentSample,
+    Sample,
 )
 
 # ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ def openeo_connection():
     except ImportError:
         pytest.skip("openeo package is not installed")
 
-    conn = CatchmentSample.connect_openeo(OPENEO_BACKEND, authenticate=True)
+    conn = Sample.connect_openeo(OPENEO_BACKEND, authenticate=True)
     return conn
 
 
@@ -109,7 +109,7 @@ def dataset() -> CatchmentDataset:
 
 
 @pytest.fixture(scope="session")
-def teign_sample(dataset: CatchmentDataset) -> CatchmentSample:
+def teign_sample(dataset: CatchmentDataset) -> Sample:
     """The smallest delineated catchment — used for fast EO downloads."""
     matches = [s for s in dataset if s.notation == _TEIGN_NOTATION]
     if not matches:
@@ -298,7 +298,7 @@ class TestQueryBands:
         # Build a minimal sample with no catchment
         import pandas as pd
 
-        from eoflow.samples import CatchmentSample
+        from eoflow.samples import Sample
 
         row = pd.Series(
             {
@@ -315,7 +315,7 @@ class TestQueryBands:
                 "delineation_error": "no stream found",
             }
         )
-        no_catch = CatchmentSample(row, catchment=None)
+        no_catch = Sample(row, catchment=None)
         with pytest.raises(ValueError, match="no delineated catchment"):
             no_catch.query_bands(
                 openeo_connection,
@@ -522,7 +522,7 @@ class TestMultipleSamples:
     logic generalises beyond the Teign catchment."""
 
     @pytest.fixture(scope="class")
-    def otter_sample(self, dataset: CatchmentDataset) -> CatchmentSample:
+    def otter_sample(self, dataset: CatchmentDataset) -> Sample:
         """RIVER OTTER AT DOTTON MILL (SW-70420116) — second-smallest catchment."""
         matches = [s for s in dataset if s.notation == "SW-70420116"]
         if not matches:

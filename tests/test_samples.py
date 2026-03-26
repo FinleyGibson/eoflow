@@ -4,12 +4,12 @@ Unit and integration tests for eoflow.samples.
 Structure
 ---------
 * Fixtures            — shared in-memory data builders (no real files required)
-* TestCatchmentSampleProperties   — property accessors, edge cases, NaN handling
-* TestCatchmentSampleSpatial      — bbox, GeoJSON, area, has_catchment
-* TestCatchmentSampleDates        — _resolve_dates logic (days_window, explicit, default)
-* TestCatchmentSampleEOInterface  — query_bands / query_ndvi / query_ndwi / query_index
+* TestSampleProperties   — property accessors, edge cases, NaN handling
+* TestSampleSpatial      — bbox, GeoJSON, area, has_catchment
+* TestSampleDates        — _resolve_dates logic (days_window, explicit, default)
+* TestSampleEOInterface  — query_bands / query_ndvi / query_ndwi / query_index
 *                                   all use a mocked openeo Connection & DataCube
-* TestCatchmentSampleConnectOpeneo — connect_openeo import guard and auth flag
+* TestSampleConnectOpeneo — connect_openeo import guard and auth flag
 * TestCatchmentDatasetFromGpkg    — from_gpkg construction, WKT fallback, only_delineated
 * TestCatchmentDatasetFromGeoDataFrame — from_geodataframe construction
 * TestCatchmentDatasetFilter      — filter() method, all criteria
@@ -39,7 +39,7 @@ from eoflow.samples import (
     OPENEO_BACKEND,
     SENTINEL2_COLLECTION,
     CatchmentDataset,
-    CatchmentSample,
+    Sample,
     _to_date_obj,
     _to_iso,
 )
@@ -117,11 +117,11 @@ def _make_row(
 def _make_sample(
     polygon: Optional[Polygon] = None,
     **row_kwargs,
-) -> CatchmentSample:
-    """Build a CatchmentSample with optional polygon override."""
+) -> Sample:
+    """Build a Sample with optional polygon override."""
     if polygon is None:
         polygon = _make_polygon()
-    return CatchmentSample(row=_make_row(**row_kwargs), catchment=polygon)
+    return Sample(row=_make_row(**row_kwargs), catchment=polygon)
 
 
 def _make_mock_connection() -> MagicMock:
@@ -162,11 +162,11 @@ def _make_gpkg(path: Path, n: int = 3) -> Path:
 
 
 # ===========================================================================
-# CatchmentSample – property accessors
+# Sample – property accessors
 # ===========================================================================
 
 
-class TestCatchmentSampleProperties:
+class TestSampleProperties:
     """Property accessors return correct types and handle missing / NaN values."""
 
     def test_id(self):
@@ -208,19 +208,19 @@ class TestCatchmentSampleProperties:
     def test_date_only_uses_first_10_chars(self):
         row = _make_row(date_str="2020-06-15")
         row["Date"] = "2020-06-15 10:30:00"
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.date == date(2020, 6, 15)
 
     def test_date_none_when_missing(self):
         row = _make_row()
         row["Date"] = None
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.date is None
 
     def test_date_none_when_nan_float(self):
         row = _make_row()
         row["Date"] = float("nan")
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.date is None
 
     def test_delineation_status(self):
@@ -258,19 +258,19 @@ class TestCatchmentSampleProperties:
     def test_latitude_none_when_nan(self):
         row = _make_row()
         row["latitude"] = float("nan")
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.latitude is None
 
     def test_longitude_none_when_nan(self):
         row = _make_row()
         row["longitude"] = float("nan")
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.longitude is None
 
     def test_result_none_when_nan(self):
         row = _make_row()
         row["result"] = float("nan")
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.result is None
 
     def test_sample_point_returns_shapely_point(self):
@@ -284,7 +284,7 @@ class TestCatchmentSampleProperties:
         row = _make_row()
         row["latitude"] = float("nan")
         row["longitude"] = float("nan")
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         assert s.sample_point is None
 
     def test_snapped_pour_point_returns_point(self):
@@ -313,26 +313,26 @@ class TestCatchmentSampleProperties:
 
 
 # ===========================================================================
-# CatchmentSample – spatial helpers
+# Sample – spatial helpers
 # ===========================================================================
 
 
-class TestCatchmentSampleSpatial:
+class TestSampleSpatial:
     def test_has_catchment_true_when_polygon_set(self):
         s = _make_sample(polygon=_make_polygon())
         assert s.has_catchment is True
 
     def test_has_catchment_false_when_none(self):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         assert s.has_catchment is False
 
     def test_has_catchment_false_when_empty_polygon(self):
-        s = CatchmentSample(row=_make_row(), catchment=Polygon())
+        s = Sample(row=_make_row(), catchment=Polygon())
         assert s.has_catchment is False
 
     def test_catchment_bbox_returns_four_floats(self):
         poly = _make_polygon(lon=-3.5, lat=50.7, size=0.1)
-        s = CatchmentSample(row=_make_row(), catchment=poly)
+        s = Sample(row=_make_row(), catchment=poly)
         bbox = s.catchment_bbox()
         assert bbox is not None
         west, south, east, north = bbox
@@ -341,15 +341,17 @@ class TestCatchmentSampleSpatial:
 
     def test_catchment_bbox_approximate_extent(self):
         poly = _make_polygon(lon=-3.5, lat=50.7, size=0.1)
-        s = CatchmentSample(row=_make_row(), catchment=poly)
-        west, south, east, north = s.catchment_bbox()
+        s = Sample(row=_make_row(), catchment=poly)
+        bbox = s.catchment_bbox()
+        assert bbox is not None
+        west, south, east, north = bbox
         assert west == pytest.approx(-3.55, abs=1e-6)
         assert east == pytest.approx(-3.45, abs=1e-6)
         assert south == pytest.approx(50.65, abs=1e-6)
         assert north == pytest.approx(50.75, abs=1e-6)
 
     def test_catchment_bbox_none_when_no_catchment(self):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         assert s.catchment_bbox() is None
 
     def test_catchment_geojson_returns_dict(self):
@@ -359,7 +361,7 @@ class TestCatchmentSampleSpatial:
         assert geojson["type"] == "Polygon"
 
     def test_catchment_geojson_none_when_no_catchment(self):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         assert s.catchment_geojson() is None
 
     def test_catchment_area_km2_positive(self):
@@ -371,13 +373,13 @@ class TestCatchmentSampleSpatial:
     def test_catchment_area_km2_reasonable_for_small_polygon(self):
         # 0.1° × 0.1° box around lat=50.7 → roughly 50 km²
         poly = _make_polygon(lon=-3.5, lat=50.7, size=0.1)
-        s = CatchmentSample(row=_make_row(lat=50.7, lon=-3.5), catchment=poly)
+        s = Sample(row=_make_row(lat=50.7, lon=-3.5), catchment=poly)
         area = s.catchment_area_km2()
         assert area is not None
         assert 30 < area < 80  # sanity bounds
 
     def test_catchment_area_km2_none_when_no_catchment(self):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         assert s.catchment_area_km2() is None
 
     def test_catchment_accepts_multipolygon(self):
@@ -385,17 +387,17 @@ class TestCatchmentSampleSpatial:
         p1 = _make_polygon(lon=-3.5, lat=50.7, size=0.02)
         p2 = _make_polygon(lon=-3.6, lat=50.8, size=0.02)
         mp = MultiPolygon([p1, p2])
-        s = CatchmentSample(row=_make_row(), catchment=mp)
+        s = Sample(row=_make_row(), catchment=mp)
         assert s.has_catchment is True
         assert s.catchment_bbox() is not None
 
 
 # ===========================================================================
-# CatchmentSample – date resolution
+# Sample – date resolution
 # ===========================================================================
 
 
-class TestCatchmentSampleDates:
+class TestSampleDates:
     def test_resolve_dates_explicit(self):
         s = _make_sample(date_str="2020-06-15")
         start, end = s._resolve_dates("2020-01-01", "2020-12-31", None)
@@ -431,14 +433,14 @@ class TestCatchmentSampleDates:
     def test_resolve_dates_raises_without_date_and_no_window(self):
         row = _make_row()
         row["Date"] = None
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         with pytest.raises(ValueError, match="no date"):
             s._resolve_dates(None, None, None)
 
     def test_resolve_dates_raises_days_window_without_sample_date(self):
         row = _make_row()
         row["Date"] = None
-        s = CatchmentSample(row=row, catchment=_make_polygon())
+        s = Sample(row=row, catchment=_make_polygon())
         with pytest.raises(ValueError, match="days_window"):
             s._resolve_dates(None, None, 15)
 
@@ -456,11 +458,11 @@ class TestCatchmentSampleDates:
 
 
 # ===========================================================================
-# CatchmentSample – EO query interface (mocked openeo)
+# Sample – EO query interface (mocked openeo)
 # ===========================================================================
 
 
-class TestCatchmentSampleEOInterface:
+class TestSampleEOInterface:
     """All openEO calls use a mocked Connection — no network required."""
 
     @pytest.fixture()
@@ -503,7 +505,7 @@ class TestCatchmentSampleEOInterface:
         assert conn.load_collection.call_args[0][0] == "SENTINEL2_L1C"
 
     def test_query_bands_raises_without_catchment(self, conn):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         with pytest.raises(ValueError, match="catchment polygon"):
             s.query_bands(conn, ["B04"], "2020-01-01", "2020-12-31")
 
@@ -580,17 +582,17 @@ class TestCatchmentSampleEOInterface:
         assert extent["north"] == pytest.approx(bbox[3])
 
     def test_spatial_extent_dict_raises_without_catchment(self):
-        s = CatchmentSample(row=_make_row(), catchment=None)
+        s = Sample(row=_make_row(), catchment=None)
         with pytest.raises(ValueError):
             s._spatial_extent_dict()
 
 
 # ===========================================================================
-# CatchmentSample – connect_openeo
+# Sample – connect_openeo
 # ===========================================================================
 
 
-class TestCatchmentSampleConnectOpeneo:
+class TestSampleConnectOpeneo:
     def test_connect_openeo_raises_import_error_when_openeo_missing(self):
         import sys
 
@@ -600,7 +602,7 @@ class TestCatchmentSampleConnectOpeneo:
             with pytest.raises(ImportError, match="openeo"):
                 # Force the lazy import inside connect_openeo to fail
                 with patch.dict("sys.modules", {"openeo": None}):
-                    CatchmentSample.connect_openeo(authenticate=False)
+                    Sample.connect_openeo(authenticate=False)
         finally:
             if openeo_mod is not None:
                 sys.modules["openeo"] = openeo_mod
@@ -616,7 +618,7 @@ class TestCatchmentSampleConnectOpeneo:
             import eoflow.samples as sm
 
             importlib.reload(sm)
-            conn = sm.CatchmentSample.connect_openeo(authenticate=False)
+            _ = sm.Sample.connect_openeo(authenticate=False)
             mock_conn.authenticate_oidc.assert_not_called()
 
     def test_connect_openeo_default_backend(self):
@@ -628,7 +630,7 @@ class TestCatchmentSampleConnectOpeneo:
             import eoflow.samples as sm
 
             importlib.reload(sm)
-            sm.CatchmentSample.connect_openeo(authenticate=False)
+            sm.Sample.connect_openeo(authenticate=False)
             mock_openeo.connect.assert_called_with(OPENEO_BACKEND)
 
 
@@ -685,7 +687,7 @@ class TestCatchmentDatasetFromGpkg:
         row_dict = row.to_dict()
         row_dict["__catchment_wkt"] = poly.wkt
         # Write with None geometry (simulating failed geometry column)
-        gdf = gpd.GeoDataFrame([row_dict], geometry=[None], crs="EPSG:4326")
+        gdf = gpd.GeoDataFrame([row_dict], geometry=[None], crs="EPSG:4326")  # type: ignore[arg-type]
         gpkg = tmp_path / "wkt_fallback.gpkg"
         gdf.to_file(str(gpkg), driver="GPKG")
 
@@ -697,7 +699,7 @@ class TestCatchmentDatasetFromGpkg:
         gpkg = _make_gpkg(tmp_path / "test.gpkg", n=2)
         ds = CatchmentDataset.from_gpkg(gpkg)
         for s in ds:
-            assert type(s).__name__ == "CatchmentSample"
+            assert type(s).__name__ == "Sample"
 
     def test_from_gpkg_reproj_to_wgs84(self, tmp_path):
         """GeoPackages in other CRS should be reprojected transparently."""
@@ -762,10 +764,8 @@ class TestCatchmentDatasetFilter:
 
     def test_with_catchments_keeps_only_delineated(self):
         samples = [
-            CatchmentSample(
-                row=_make_row(notation="SW-00000001", status="ok"), catchment=_make_polygon()
-            ),
-            CatchmentSample(row=_make_row(notation="SW-00000002", status="error"), catchment=None),
+            Sample(row=_make_row(notation="SW-00000001", status="ok"), catchment=_make_polygon()),
+            Sample(row=_make_row(notation="SW-00000002", status="error"), catchment=None),
         ]
         ds = CatchmentDataset(samples)
         result = ds.with_catchments()
@@ -792,8 +792,8 @@ class TestCatchmentDatasetFilter:
 
     def test_filter_delineation_status(self):
         samples = [
-            CatchmentSample(row=_make_row(notation="A", status="ok"), catchment=_make_polygon()),
-            CatchmentSample(row=_make_row(notation="B", status="error"), catchment=None),
+            Sample(row=_make_row(notation="A", status="ok"), catchment=_make_polygon()),
+            Sample(row=_make_row(notation="B", status="error"), catchment=None),
         ]
         ds = CatchmentDataset(samples)
         ok_only = ds.filter(delineation_status="ok")
@@ -802,8 +802,8 @@ class TestCatchmentDatasetFilter:
 
     def test_filter_site_name_contains_case_insensitive(self):
         samples = [
-            CatchmentSample(row=_make_row(site="RIVER EXE AT EXETER"), catchment=_make_polygon()),
-            CatchmentSample(row=_make_row(site="RIVER DART AT TOTNES"), catchment=_make_polygon()),
+            Sample(row=_make_row(site="RIVER EXE AT EXETER"), catchment=_make_polygon()),
+            Sample(row=_make_row(site="RIVER DART AT TOTNES"), catchment=_make_polygon()),
         ]
         ds = CatchmentDataset(samples)
         result = ds.filter(site_name_contains="exe")
@@ -812,8 +812,8 @@ class TestCatchmentDatasetFilter:
 
     def test_filter_after_date(self):
         samples = [
-            CatchmentSample(row=_make_row(date_str="2020-01-01"), catchment=_make_polygon()),
-            CatchmentSample(row=_make_row(date_str="2021-06-15"), catchment=_make_polygon()),
+            Sample(row=_make_row(date_str="2020-01-01"), catchment=_make_polygon()),
+            Sample(row=_make_row(date_str="2021-06-15"), catchment=_make_polygon()),
         ]
         ds = CatchmentDataset(samples)
         result = ds.filter(after="2021-01-01")
@@ -822,8 +822,8 @@ class TestCatchmentDatasetFilter:
 
     def test_filter_before_date(self):
         samples = [
-            CatchmentSample(row=_make_row(date_str="2020-01-01"), catchment=_make_polygon()),
-            CatchmentSample(row=_make_row(date_str="2021-06-15"), catchment=_make_polygon()),
+            Sample(row=_make_row(date_str="2020-01-01"), catchment=_make_polygon()),
+            Sample(row=_make_row(date_str="2021-06-15"), catchment=_make_polygon()),
         ]
         ds = CatchmentDataset(samples)
         result = ds.filter(before="2020-12-31")
@@ -860,7 +860,7 @@ class TestCatchmentDatasetCollectionProtocol:
     @pytest.fixture()
     def ds(self) -> CatchmentDataset:
         samples = [
-            CatchmentSample(row=_make_row(notation=f"SW-{i:08d}"), catchment=_make_polygon())
+            Sample(row=_make_row(notation=f"SW-{i:08d}"), catchment=_make_polygon())
             for i in range(5)
         ]
         return CatchmentDataset(samples)
@@ -870,18 +870,18 @@ class TestCatchmentDatasetCollectionProtocol:
 
     def test_iter_yields_catchment_samples(self, ds):
         for s in ds:
-            assert isinstance(s, CatchmentSample)
+            assert isinstance(s, Sample)
 
     def test_iter_count(self, ds):
         assert sum(1 for _ in ds) == 5
 
     def test_getitem_integer(self, ds):
         s = ds[0]
-        assert isinstance(s, CatchmentSample)
+        assert isinstance(s, Sample)
 
     def test_getitem_negative_index(self, ds):
         s = ds[-1]
-        assert isinstance(s, CatchmentSample)
+        assert isinstance(s, Sample)
 
     def test_getitem_slice_returns_dataset(self, ds):
         sub = ds[1:3]
@@ -917,7 +917,7 @@ class TestCatchmentDatasetBulkEO:
     @pytest.fixture()
     def ds(self) -> CatchmentDataset:
         samples = [
-            CatchmentSample(
+            Sample(
                 row=_make_row(notation=f"SW-{i:08d}", date_str="2020-06-15"),
                 catchment=_make_polygon(),
             )
@@ -941,13 +941,11 @@ class TestCatchmentDatasetBulkEO:
 
     def test_query_all_ndvi_skips_no_catchment(self, conn):
         samples = [
-            CatchmentSample(
+            Sample(
                 row=_make_row(notation="SW-OK00001", date_str="2020-06-15"),
                 catchment=_make_polygon(),
             ),
-            CatchmentSample(
-                row=_make_row(notation="SW-FAIL001", date_str="2020-06-15"), catchment=None
-            ),
+            Sample(row=_make_row(notation="SW-FAIL001", date_str="2020-06-15"), catchment=None),
         ]
         ds = CatchmentDataset(samples)
         cubes = ds.query_all_ndvi(conn, days_window=15)
@@ -992,7 +990,7 @@ class TestCatchmentDatasetExport:
     @pytest.fixture()
     def ds(self) -> CatchmentDataset:
         samples = [
-            CatchmentSample(
+            Sample(
                 row=_make_row(notation=f"SW-{i:08d}", result=float(i * 3 + 1)),
                 catchment=_make_polygon(),
             )
@@ -1048,7 +1046,7 @@ class TestCatchmentDatasetExport:
 
     def test_summary_none_catchment_has_nan_area(self):
         samples = [
-            CatchmentSample(row=_make_row(notation="SW-NO000001"), catchment=None),
+            Sample(row=_make_row(notation="SW-NO000001"), catchment=None),
         ]
         ds = CatchmentDataset(samples)
         df = ds.summary()
@@ -1065,7 +1063,7 @@ class TestModulePublicAPI:
         import eoflow.samples  # noqa: F401
 
     def test_top_level_eoflow_exports(self):
-        from eoflow import CatchmentDataset, CatchmentSample  # noqa: F401
+        from eoflow import CatchmentDataset, Sample  # noqa: F401
 
     def test_constants_defined(self):
         assert isinstance(OPENEO_BACKEND, str)
@@ -1092,7 +1090,7 @@ class TestModulePublicAPI:
         assert _to_date_obj("2020-06-15 08:30:00") == date(2020, 6, 15)
 
     def test_catchment_sample_docstring_present(self):
-        assert CatchmentSample.__doc__ is not None
+        assert Sample.__doc__ is not None
 
     def test_catchment_dataset_docstring_present(self):
         assert CatchmentDataset.__doc__ is not None
@@ -1129,7 +1127,7 @@ class TestIntegration:
 
     def test_all_samples_are_catchment_sample_instances(self, ds):
         for s in ds:
-            assert type(s).__name__ == "CatchmentSample"
+            assert type(s).__name__ == "Sample"
 
     def test_all_delineated_have_catchment(self, ds):
         for s in ds:
