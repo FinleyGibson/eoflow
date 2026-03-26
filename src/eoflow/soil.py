@@ -118,6 +118,23 @@ SEARG_GROUPS: Tuple[str, ...] = (
     "Shallow soils",
 )
 
+#: Official EA/DEFRA colour scheme for each SEARG_Concise group.
+#: Matches the ArcGIS service renderer used in the EA online viewer.
+SEARG_COLOURS: Dict[str, str] = {
+    "Alluvial and coastal soils": "#5b9bd4",
+    "Heavy clay soils with poor drainage": "#548034",
+    "Light free drainage": "#ffc105",
+    "Light soils with moderate & poor drainage": "#ffd966",
+    "Man made": "#002673",
+    "Medium soils with free drainage": "#dec98e",
+    "Medium soils with moderate drainage": "#ab6a0f",
+    "Medium with soils poor drainage": "#b09604",
+    "Organic soils with free drainage": "#e6e6e6",
+    "Organic soils with poor drainage": "#cfcfcf",
+    "Peat": "#808080",
+    "Shallow soils": "#ffff99",
+}
+
 #: Attribute fields requested from the service in every query.
 _QUERY_FIELDS: Tuple[str, ...] = (
     "OBJECTID",
@@ -452,6 +469,7 @@ def soil_coverage(
     *,
     session: Optional[requests.Session] = None,
     timeout: int = 60,
+    polygons_gdf: Optional[gpd.GeoDataFrame] = None,
 ) -> pd.Series:
     """Compute the fractional SEARG soil-group coverage within *polygon*.
 
@@ -513,7 +531,10 @@ def soil_coverage(
     if catchment_area_m2 == 0.0:
         raise ValueError("Input polygon has zero area after reprojection to BNG.")
 
-    gdf = query_soil_polygons(polygon, session=session, timeout=timeout)
+    if polygons_gdf is not None:
+        gdf = polygons_gdf
+    else:
+        gdf = query_soil_polygons(polygon, session=session, timeout=timeout)
 
     # Accumulate intersection area (m²) per SEARG_Concise group
     area_by_group: Dict[str, float] = {g: 0.0 for g in SEARG_GROUPS}

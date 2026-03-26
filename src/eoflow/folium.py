@@ -1150,6 +1150,14 @@ def add_sample(
             xr = None  # type: ignore[assignment]
             _xr_available = False
 
+        try:
+            import geopandas as _gpd
+
+            _gpd_available = True
+        except ImportError:
+            _gpd = None  # type: ignore[assignment]
+            _gpd_available = False
+
         for layer_name, layer in _resolved_layers.items():
             if isinstance(layer, folium.raster_layers.ImageOverlay):
                 # Pre-built overlay — add directly
@@ -1165,10 +1173,82 @@ def add_sample(
                 cmap_name = str(_get("colormaps", "elevation", "terrain"))
                 make_raster_overlay(layer, cmap=cmap_name, label=layer_name).add_to(f_map)
 
+            elif _gpd_available and _gpd is not None and isinstance(layer, _gpd.GeoDataFrame):
+                # Vector polygon layer (e.g. SEARG soil polygons)
+                _make_soil_featuregroup(layer, layer_name).add_to(f_map)
+
     if add_layer_control:
         folium.LayerControl(collapsed=False).add_to(f_map)
 
     return f_map
+
+
+def _make_soil_featuregroup(gdf, name: str) -> folium.FeatureGroup:
+    """Build a Folium ``FeatureGroup`` for a SEARG soil-polygon GeoDataFrame.
+
+    Each polygon is coloured using the official EA/DEFRA SEARG colour scheme
+    (:data:`eoflow.soil.SEARG_COLOURS`).  Clicking a polygon opens a popup
+    with the soil-group name, mapping-unit name, BFI, and SPR values.
+
+    Parameters
+    ----------
+    gdf:
+        GeoDataFrame of SEARG soil polygons in **any CRS** (reprojected to
+        WGS-84 internally for Folium).  Expected columns: ``SEARG_Concise``,
+        ``MU_NAME``, ``BFI``, ``SPR``, ``SEARGDescription``.
+    name:
+        Layer name shown in the ``LayerControl``.
+
+    Returns
+    -------
+    folium.FeatureGroup
+        Ready to ``add_to(m)``.
+    """
+    from eoflow.soil import SEARG_COLOURS
+
+    fg = folium.FeatureGroup(name=name, show=True)
+
+    # Reproject to WGS-84 (Folium requires lat/lon)
+    gdf_wgs = gdf.to_crs("EPSG:4326")
+
+    for _, row in gdf_wgs.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        group = row.get("SEARG_Concise") or "Unknown"
+        fill = SEARG_COLOURS.get(group, "#aaaaaa")
+        bfi = row.get("BFI")
+        spr = row.get("SPR")
+        desc = str(row.get("SEARGDescription") or "")
+
+        popup_lines = [f"<b>{group}</b>"]
+        mu = row.get("MU_NAME")
+        if mu:
+            popup_lines.append(f"MU: {mu}")
+        if bfi is not None:
+            try:
+                popup_lines.append(f"BFI: {float(bfi):.3f}")
+            except (ValueError, TypeError):
+                pass
+        if spr is not None:
+            popup_lines.append(f"SPR: {spr}")
+        if desc:
+            popup_lines.append(f"<i style='font-size:10px;color:#555'>{desc[:140]}</i>")
+
+        folium.GeoJson(
+            geom.__geo_interface__,
+            style_function=lambda _, c=fill: {
+                "fillColor": c,
+                "color": "#555555",
+                "weight": 0.4,
+                "fillOpacity": 0.75,
+            },
+            tooltip=group,
+            popup=folium.Popup("<br>".join(popup_lines), max_width=260),
+        ).add_to(fg)
+
+    return fg
 
 
 def _layers_from_sample(sample) -> dict:
@@ -1222,6 +1302,9 @@ def _layers_from_sample(sample) -> dict:
             sl.aspect,
             _get("colormaps", "aspect", "twilight"),
         )
+
+    if getattr(sl, "soil_polygons", None) is not None and not sl.soil_polygons.empty:
+        layers["SEARG Soil Types"] = sl.soil_polygons
 
     if getattr(sl, "rainfall", None) is not None:
         # Collapse the time dimension before rendering

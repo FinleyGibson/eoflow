@@ -100,6 +100,12 @@ class CatchmentLayers:
         0–1, indexed by the 12 SEARG group names).  Values sum to ≤ 1 (the
         gap represents area not covered by any SEARG polygon, e.g. Scotland
         or the sea).  Populated by :meth:`CatchmentSample.compute_soil_type`.
+    soil_polygons : geopandas.GeoDataFrame or None
+        Raw SEARG soil polygons (in EPSG:27700) that intersect the catchment,
+        as returned by :func:`eoflow.soil.query_soil_polygons`.  Key columns:
+        ``SEARG_Concise``, ``MU_NAME``, ``BFI``, ``SPR``,
+        ``SEARGDescription``.  Populated alongside :attr:`soil_type` by
+        :meth:`CatchmentSample.compute_soil_type`.
     rainfall : xarray.DataArray or None
         Rainfall rate in mm/h with dimensions ``(time, y, x)`` on a BNG
         grid.  Unlike the static layers, this carries an explicit temporal
@@ -112,6 +118,7 @@ class CatchmentLayers:
     slope: Optional["xarray.DataArray"] = field(default=None)
     aspect: Optional["xarray.DataArray"] = field(default=None)
     soil_type: Optional[pd.Series] = field(default=None)
+    soil_polygons: Optional[gpd.GeoDataFrame] = field(default=None)
     rainfall: Optional["xarray.DataArray"] = field(default=None)
 
     @property
@@ -119,7 +126,7 @@ class CatchmentLayers:
         """Names of layers that have been computed (non-``None``)."""
         return [
             name
-            for name in ("topography", "slope", "aspect", "soil_type", "rainfall")
+            for name in ("topography", "slope", "aspect", "soil_type", "soil_polygons", "rainfall")
             if getattr(self, name) is not None
         ]
 
@@ -578,7 +585,7 @@ class Sample:
         extend into Scotland, Ireland, or offshore will show lower total
         fractional coverage.
         """
-        from eoflow.soil import soil_coverage
+        from eoflow.soil import query_soil_polygons, soil_coverage
 
         if not self.has_catchment:
             raise ValueError(
@@ -587,7 +594,9 @@ class Sample:
             )
 
         logger.info("Querying SEARG soil type for site '%s' …", self.site_name)
-        series = soil_coverage(self.catchment, session=session, timeout=timeout)
+        gdf = query_soil_polygons(self.catchment, session=session, timeout=timeout)
+        self.layers.soil_polygons = gdf
+        series = soil_coverage(self.catchment, session=session, timeout=timeout, polygons_gdf=gdf)
         self.layers.soil_type = series
         n_groups = int((series > 0).sum())
         logger.info(
@@ -1376,6 +1385,13 @@ class Sample:
             )
             logger.debug("Saved soil_type layer to %s", layers_dir / "soil_type.json")
 
+        if self.layers.soil_polygons is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            self.layers.soil_polygons.to_file(
+                layers_dir / "soil_polygons.geojson", driver="GeoJSON"
+            )
+            logger.debug("Saved soil polygons to %s", layers_dir / "soil_polygons.geojson")
+
         if self.layers.rainfall is not None:
             layers_dir.mkdir(parents=True, exist_ok=True)
             da = self.layers.rainfall
@@ -1454,6 +1470,11 @@ class Sample:
             if soil_path.exists():
                 sample.layers.soil_type = pd.read_json(soil_path, typ="series", dtype=False)
                 logger.debug("Loaded soil_type layer from %s", soil_path)
+
+            soil_polygons_path = layers_dir / "soil_polygons.geojson"
+            if soil_polygons_path.exists():
+                sample.layers.soil_polygons = gpd.read_file(soil_polygons_path)
+                logger.debug("Loaded soil polygons from %s", soil_polygons_path)
 
             rainfall_path = layers_dir / "rainfall.nc"
             if rainfall_path.exists():
