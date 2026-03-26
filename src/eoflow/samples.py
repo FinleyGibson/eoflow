@@ -1,61 +1,22 @@
-"""
-samples.py — Catchment-aware water-quality sample store with EO query support.
-
-Provides two main classes:
-
-* :class:`CatchmentSample`
-    A single water-quality observation enriched with the delineated catchment
-    polygon produced by ``dataset_builder.py``.  Exposes methods to query
-    Earth Observation data (Sentinel-2 L2A via openEO) for the catchment area
-    over an arbitrary date range, including built-in NDVI / NDWI helpers and
-    support for any raw band combination.
-
-* :class:`CatchmentDataset`
-    A collection of :class:`CatchmentSample` objects loaded from the
-    GeoPackage written by ``dataset_builder.py``.  Supports filtering,
-    iteration, and bulk EO queries.
-
-Typical usage
--------------
-    >>> from samples import CatchmentDataset
-    >>> ds = CatchmentDataset.from_gpkg("data/devon_water_quality_dataset.gpkg")
-    >>> print(ds)
-    CatchmentDataset(10 samples, 10 with catchments)
-
-    >>> sample = ds[0]
-    >>> print(sample)
-    CatchmentSample(id='...', site='RIVER OTTER AT DOTTON MILL', date='2020-01-14', result=57.0)
-
-    >>> # Compute NDVI for the catchment in the month around the sample date
-    >>> conn = sample.connect_openeo()                  # prompts OIDC login
-    >>> ndvi = sample.query_ndvi(conn, days_window=15)  # returns DataCube
-    >>> ndvi.download("otter_ndvi.tif", format="GTiff")
-
-    >>> # Query raw bands
-    >>> cube = sample.query_bands(conn, ["B03", "B08", "B11"],
-    ...                           start_date="2020-01-01",
-    ...                           end_date="2020-03-31")
-
-EO backend
-----------
-All queries target the Copernicus Data Space Ecosystem openEO federation
-endpoint (``openeofed.dataspace.copernicus.eu``) using ``SENTINEL2_L2A``
-by default.  A free Copernicus Data Space account is required; authentication
-is done via OIDC (``connection.authenticate_oidc()``).
-
-References
-----------
-* openEO Python client: https://open-eo.github.io/openeo-python-client/
-* Copernicus Data Space: https://dataspace.copernicus.eu/
-"""
-
 from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import geopandas as gpd
 import pandas as pd
@@ -66,6 +27,7 @@ from eoflow.log_utils import get_logger
 
 if TYPE_CHECKING:
     import openeo  # type: ignore[import-untyped]
+    import xarray  # type: ignore[import-untyped]
 
 logger = get_logger(__name__)
 
@@ -104,25 +66,74 @@ _COL_WKT = "__catchment_wkt"
 
 
 # ---------------------------------------------------------------------------
+# CatchmentLayers
+# ---------------------------------------------------------------------------
+
+
+@dataclass(repr=False)
+class CatchmentLayers:
+    """Container for all computed spatial layers associated with a catchment.
+
+    Each attribute is populated by the corresponding ``compute_*`` method on
+    :class:`CatchmentSample` and is ``None`` until computed.  This dataclass
+    is intentionally kept separate from :class:`CatchmentSample` so that
+    computed results — some of which carry a temporal dimension — can be
+    inspected, serialised, or passed around independently of the observation
+    metadata.
+
+    Attributes
+    ----------
+    topography : xarray.DataArray or None
+        Elevation in metres on a BNG (EPSG:27700) regular grid, shape
+        ``(y, x)``.  Populated by :meth:`CatchmentSample.compute_topography`.
+    slope : xarray.DataArray or None
+        Terrain slope grid (units depend on the ``output`` kwarg supplied to
+        :meth:`CatchmentSample.compute_slope`, default degrees), shape
+        ``(y, x)``.  Populated by :meth:`CatchmentSample.compute_slope`.
+    soil_type : pandas.Series or None
+        Fractional SEARG soil-group coverage within the catchment (values
+        0–1, indexed by the 12 SEARG group names).  Values sum to ≤ 1 (the
+        gap represents area not covered by any SEARG polygon, e.g. Scotland
+        or the sea).  Populated by :meth:`CatchmentSample.compute_soil_type`.
+    rainfall : xarray.DataArray or None
+        Rainfall rate in mm/h with dimensions ``(time, y, x)`` on a BNG
+        grid.  Unlike the static layers, this carries an explicit temporal
+        dimension — use the ``start``/``end`` parameters of
+        :meth:`CatchmentSample.compute_rainfall` to control the time window.
+        Populated by :meth:`CatchmentSample.compute_rainfall`.
+    """
+
+    topography: Optional["xarray.DataArray"] = field(default=None)
+    slope: Optional["xarray.DataArray"] = field(default=None)
+    soil_type: Optional[pd.Series] = field(default=None)
+    rainfall: Optional["xarray.DataArray"] = field(default=None)
+
+    @property
+    def available(self) -> List[str]:
+        """Names of layers that have been computed (non-``None``)."""
+        return [
+            name
+            for name in ("topography", "slope", "soil_type", "rainfall")
+            if getattr(self, name) is not None
+        ]
+
+    def __repr__(self) -> str:
+        available = self.available
+        if available:
+            return f"CatchmentLayers(computed={available!r})"
+        return "CatchmentLayers(no layers computed yet)"
+
+
+# ---------------------------------------------------------------------------
 # CatchmentSample
 # ---------------------------------------------------------------------------
 
 
-class CatchmentSample:
-    """A water-quality observation with its delineated catchment polygon.
-
-    Attributes
-    ----------
-    row : pandas.Series
-        The raw row from the GeoPackage GeoDataFrame (read-only view).
-    catchment : shapely.geometry.Polygon or None
-        The delineated catchment polygon in WGS 84 (EPSG:4326), or ``None``
-        if delineation failed for this sample.
-    """
-
+class Sample:
     def __init__(self, row: pd.Series, catchment: Optional[BaseGeometry]) -> None:
         self._row = row.copy()
         self.catchment: Optional[BaseGeometry] = catchment
+        self.layers: CatchmentLayers = CatchmentLayers()
 
     # ------------------------------------------------------------------
     # Convenience property accessors
@@ -254,6 +265,499 @@ class CatchmentSample:
         area_deg2 = poly.area
         area_km2 = area_deg2 * metres_per_deg_lat * metres_per_deg_lon / 1e6
         return area_km2
+
+    # ------------------------------------------------------------------
+    # Catchment delineation
+    # ------------------------------------------------------------------
+
+    def delineate(
+        self,
+        dem_path: Union[str, Path],
+        *,
+        flow_acc_threshold: int = 5000,
+        **kwargs: Any,
+    ) -> None:
+        """Delineate the catchment polygon from a DEM for this sample's pour point.
+
+        Wraps :func:`eoflow.catchment.delineate_catchment_with_metadata` and
+        updates :attr:`catchment`, the snapped-pour-point row fields, the
+        flow-accumulation value, and :attr:`delineation_status` in place.
+
+        Parameters
+        ----------
+        dem_path : str or Path
+            Path to a GeoTIFF DEM covering the pour-point location.
+        flow_acc_threshold : int
+            Minimum upstream cell count used when snapping the pour point to
+            the nearest stream.  Higher values snap to larger streams
+            (default: 5000).
+        **kwargs
+            Additional keyword arguments forwarded to
+            :func:`~eoflow.catchment.delineate_catchment_with_metadata`
+            (e.g. ``routing``, ``pit_fill``, ``fill_depressions``).
+
+        Raises
+        ------
+        ValueError
+            If the sample has no recorded latitude/longitude coordinates.
+        FileNotFoundError
+            If *dem_path* does not exist.
+
+        Notes
+        -----
+        On success the following are updated in place:
+
+        * ``self.catchment`` — the new :class:`~shapely.geometry.Polygon`
+        * ``self._row["snap_latitude"]`` / ``"snap_longitude"``
+        * ``self._row["flow_acc_at_pour_point"]``
+        * ``self._row["delineation_status"]`` → ``"ok"``
+        * ``self._row["delineation_error"]`` → ``""``
+
+        On failure a warning is logged, ``delineation_status`` is set to
+        ``"error"``, and the exception is re-raised.
+        """
+        from eoflow.catchment import delineate_catchment_with_metadata
+
+        point = self.sample_point
+        if point is None:
+            raise ValueError(
+                f"Sample '{self.id}' has no recorded coordinates — cannot delineate a catchment."
+            )
+
+        logger.info("Delineating catchment for site '%s' …", self.site_name)
+        try:
+            meta = delineate_catchment_with_metadata(
+                point,
+                dem_path,
+                flow_acc_threshold=flow_acc_threshold,
+                **kwargs,
+            )
+        except Exception as exc:
+            self._row[_COL_STATUS] = "error"
+            self._row[_COL_ERROR] = str(exc)
+            logger.warning(
+                "Catchment delineation failed for site '%s': %s",
+                self.site_name,
+                exc,
+            )
+            raise
+
+        self.catchment = meta["polygon"]
+        snapped: Point = meta["snapped_pour_point"]
+        self._row[_COL_SNAP_LAT] = snapped.y
+        self._row[_COL_SNAP_LON] = snapped.x
+        self._row[_COL_FLOW_ACC] = meta["flow_acc_at_pour_point"]
+        self._row[_COL_STATUS] = "ok"
+        self._row[_COL_ERROR] = ""
+
+        logger.info(
+            "Catchment delineated for site '%s' — area ≈ %.3f km².",
+            self.site_name,
+            self.catchment_area_km2() or float("nan"),
+        )
+
+    # ------------------------------------------------------------------
+    # Spatial layer computation
+    # ------------------------------------------------------------------
+
+    def compute_topography(
+        self,
+        dem_path: Union[str, Path],
+        *,
+        res: int = 50,
+    ) -> "xarray.DataArray":
+        """Extract elevation data for the catchment polygon from a DEM.
+
+        Delegates to :func:`eoflow.topography.get_topography_for_polygon` and
+        stores the result in :attr:`layers.topography`.
+
+        Parameters
+        ----------
+        dem_path : str or Path
+            Path to a GeoTIFF DEM (any CRS; reprojected internally to BNG).
+        res : int
+            Output grid resolution in BNG metres (default: 50 m).
+
+        Returns
+        -------
+        xarray.DataArray
+            Elevation in metres with dimensions ``(y, x)``, CRS EPSG:27700.
+            Also stored in ``self.layers.topography``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon.
+        FileNotFoundError
+            If *dem_path* does not exist.
+        """
+        from eoflow.topography import get_topography_for_polygon
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info("Computing topography for site '%s' …", self.site_name)
+        da = get_topography_for_polygon(self.catchment, dem_path, res=res)
+        self.layers.topography = da
+        logger.info(
+            "Topography stored: grid %d × %d, elevation range %.1f – %.1f m.",
+            da.sizes.get("y", 0),
+            da.sizes.get("x", 0),
+            float(da.min()),
+            float(da.max()),
+        )
+        return da
+
+    def compute_slope(
+        self,
+        dem_path: Union[str, Path],
+        *,
+        res: int = 50,
+        output: Literal["degrees", "percent_rise", "radians"] = "degrees",
+    ) -> "xarray.DataArray":
+        """Compute terrain slope for the catchment polygon from a DEM.
+
+        Delegates to :func:`eoflow.topography.get_slope_for_polygon` using
+        Horn's (1981) 3 × 3 neighbourhood method and stores the result in
+        :attr:`layers.slope`.
+
+        Parameters
+        ----------
+        dem_path : str or Path
+            Path to a GeoTIFF DEM (any CRS; reprojected internally to BNG).
+        res : int
+            Output grid resolution in BNG metres (default: 50 m).
+        output : Literal["degrees", "percent_rise", "radians"]
+            Slope units: ``"degrees"`` (default), ``"percent_rise"``, or
+            ``"radians"``.
+
+        Returns
+        -------
+        xarray.DataArray
+            Slope grid in the requested units with dimensions ``(y, x)``,
+            CRS EPSG:27700.  Also stored in ``self.layers.slope``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon, or if *output*
+            is not a recognised unit string.
+        FileNotFoundError
+            If *dem_path* does not exist.
+        """
+        from eoflow.topography import get_slope_for_polygon
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info("Computing slope (%s) for site '%s' …", output, self.site_name)
+        da = get_slope_for_polygon(self.catchment, dem_path, res=res, output=output)
+        self.layers.slope = da
+        logger.info(
+            "Slope stored: grid %d × %d, range %.2f – %.2f %s.",
+            da.sizes.get("y", 0),
+            da.sizes.get("x", 0),
+            float(da.min()),
+            float(da.max()),
+            da.attrs.get("units", output),
+        )
+        return da
+
+    def compute_soil_type(
+        self,
+        *,
+        session: Optional[Any] = None,
+        timeout: int = 60,
+    ) -> pd.Series:
+        """Query SEARG soil-group fractional coverage for the catchment.
+
+        Delegates to :func:`eoflow.soil.soil_coverage` and stores the result
+        in :attr:`layers.soil_type`.
+
+        Parameters
+        ----------
+        session : requests.Session, optional
+            Optional reusable HTTP session for connection pooling or retries.
+            A new session is created internally if not provided.
+        timeout : int
+            HTTP request timeout in seconds (default: 60).
+
+        Returns
+        -------
+        pandas.Series
+            Fractional SEARG soil-group coverage (0–1), indexed by the 12
+            SEARG group names.  Values sum to ≤ 1.
+            Also stored in ``self.layers.soil_type``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon.
+        requests.HTTPError
+            On a non-2xx response from the SEARG ArcGIS service.
+        RuntimeError
+            If the SEARG service returns an error payload.
+
+        Notes
+        -----
+        Coverage is computed for England and Wales only.  Catchments that
+        extend into Scotland, Ireland, or offshore will show lower total
+        fractional coverage.
+        """
+        from eoflow.soil import soil_coverage
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info("Querying SEARG soil type for site '%s' …", self.site_name)
+        series = soil_coverage(self.catchment, session=session, timeout=timeout)
+        self.layers.soil_type = series
+        n_groups = int((series > 0).sum())
+        logger.info(
+            "Soil type stored: %d SEARG group(s) present, total coverage %.1f%%.",
+            n_groups,
+            series.sum() * 100,
+        )
+        return series
+
+    def compute_rainfall(
+        self,
+        start: Union[str, datetime],
+        end: Union[str, datetime],
+        *,
+        download_dir: Optional[Union[str, Path]] = None,
+        res: int = 1000,
+        run_hour: Optional[int] = None,
+        workers: int = 4,
+    ) -> "xarray.DataArray":
+        """Download and extract Met Office UKV rainfall-rate data for the catchment.
+
+        Delegates to :func:`eoflow.rainfall.get_rainfall_for_polygon` and
+        stores the result in :attr:`layers.rainfall`.
+
+        Unlike the static layers (topography, slope, soil type), rainfall
+        data carries an explicit temporal dimension: the returned array has
+        shape ``(time, y, x)`` where ``time`` holds UTC timestamps at
+        15-minute intervals.
+
+        Parameters
+        ----------
+        start : str or datetime
+            Start of the time window (UTC, inclusive).  Either a
+            ``"YYYY-MM-DDTHH:MM"`` string or an aware
+            :class:`~datetime.datetime`.
+        end : str or datetime
+            End of the time window (UTC, inclusive).
+        download_dir : str or Path, optional
+            Directory for caching downloaded ``*.nc`` files.  Pass an
+            explicit path to avoid re-downloading on repeated calls.  When
+            ``None``, a temporary directory is used and cleaned up
+            automatically.
+        res : int
+            Output BNG grid resolution in metres (default: 1000 m).
+        run_hour : int or None
+            Restrict to files from the model run starting at this UTC hour
+            (0–23).  ``None`` (default) uses all available runs.
+        workers : int
+            Number of parallel download threads (default: 4).
+
+        Returns
+        -------
+        xarray.DataArray
+            Rainfall rate in mm/h with dimensions ``(time, y, x)``, CRS
+            EPSG:27700.  Also stored in ``self.layers.rainfall``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon, or if *end*
+            precedes *start*.
+        """
+        from eoflow.rainfall import get_rainfall_for_polygon
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info(
+            "Fetching rainfall for site '%s' (%s → %s) …",
+            self.site_name,
+            start,
+            end,
+        )
+        da = get_rainfall_for_polygon(
+            self.catchment,
+            start,
+            end,
+            download_dir=download_dir,
+            res=res,
+            run_hour=run_hour,
+            workers=workers,
+        )
+        self.layers.rainfall = da
+        n_times = da.sizes.get("time", 0)
+        logger.info(
+            "Rainfall stored: %d timestep(s), grid %d × %d.",
+            n_times,
+            da.sizes.get("y", 0),
+            da.sizes.get("x", 0),
+        )
+        return da
+
+    def compute_layers(
+        self,
+        dem_path: Union[str, Path],
+        *,
+        rainfall_start: Union[str, datetime, None] = None,
+        rainfall_end: Union[str, datetime, None] = None,
+        rainfall_download_dir: Optional[Union[str, Path]] = None,
+        rainfall_res: int = 1000,
+        topo_res: int = 50,
+        slope_output: Literal["degrees", "percent_rise", "radians"] = "degrees",
+        soil_timeout: int = 60,
+        delineate_if_missing: bool = True,
+        flow_acc_threshold: int = 5000,
+    ) -> CatchmentLayers:
+        """Compute all spatial layers for this catchment in a single call.
+
+        Convenience wrapper that calls (in order):
+
+        1. :meth:`delineate` — only when *delineate_if_missing* is ``True``
+           and :attr:`has_catchment` is ``False``.
+        2. :meth:`compute_topography`
+        3. :meth:`compute_slope`
+        4. :meth:`compute_soil_type`
+        5. :meth:`compute_rainfall` — only when both *rainfall_start* and
+           *rainfall_end* are provided.
+
+        Each step is attempted independently: a failure in one step is logged
+        as a warning and execution continues with the next step rather than
+        aborting the whole run.
+
+        Parameters
+        ----------
+        dem_path : str or Path
+            Path to a GeoTIFF DEM used for delineation, topography, and
+            slope computation.
+        rainfall_start, rainfall_end : str or datetime, optional
+            Time window for rainfall extraction.  If either is ``None``
+            (the default) the rainfall step is skipped.
+        rainfall_download_dir : str or Path, optional
+            Cache directory for Met Office NetCDF downloads.
+        rainfall_res : int
+            BNG resolution for the rainfall grid in metres (default: 1000 m).
+        topo_res : int
+            BNG resolution for the topography and slope grids in metres
+            (default: 50 m).
+        slope_output : str
+            Slope units — ``"degrees"`` (default), ``"percent_rise"``, or
+            ``"radians"``.
+        soil_timeout : int
+            HTTP timeout in seconds for the SEARG soil-data request
+            (default: 60 s).
+        delineate_if_missing : bool
+            If ``True`` (default) and this sample has no catchment polygon,
+            attempt to delineate one from *dem_path* before computing layers.
+        flow_acc_threshold : int
+            Passed to :meth:`delineate` when delineation is triggered.
+
+        Returns
+        -------
+        CatchmentLayers
+            The populated :attr:`layers` object (same reference as
+            ``self.layers``).
+        """
+        # --- optional delineation -----------------------------------------
+        if delineate_if_missing and not self.has_catchment:
+            logger.info(
+                "No catchment polygon for site '%s' — attempting delineation …",
+                self.site_name,
+            )
+            try:
+                self.delineate(dem_path, flow_acc_threshold=flow_acc_threshold)
+            except Exception as exc:
+                logger.warning(
+                    "Delineation failed for site '%s': %s — skipping all layers.",
+                    self.site_name,
+                    exc,
+                )
+                return self.layers
+
+        if not self.has_catchment:
+            logger.warning(
+                "Site '%s' has no catchment polygon — skipping layer computation.",
+                self.site_name,
+            )
+            return self.layers
+
+        # --- topography ---------------------------------------------------
+        try:
+            self.compute_topography(dem_path, res=topo_res)
+        except Exception as exc:
+            logger.warning(
+                "Topography computation failed for site '%s': %s",
+                self.site_name,
+                exc,
+            )
+
+        # --- slope --------------------------------------------------------
+        try:
+            self.compute_slope(dem_path, res=topo_res, output=slope_output)
+        except Exception as exc:
+            logger.warning(
+                "Slope computation failed for site '%s': %s",
+                self.site_name,
+                exc,
+            )
+
+        # --- soil type ----------------------------------------------------
+        try:
+            self.compute_soil_type(timeout=soil_timeout)
+        except Exception as exc:
+            logger.warning(
+                "Soil type query failed for site '%s': %s",
+                self.site_name,
+                exc,
+            )
+
+        # --- rainfall (optional) ------------------------------------------
+        if rainfall_start is not None and rainfall_end is not None:
+            try:
+                self.compute_rainfall(
+                    rainfall_start,
+                    rainfall_end,
+                    download_dir=rainfall_download_dir,
+                    res=rainfall_res,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Rainfall computation failed for site '%s': %s",
+                    self.site_name,
+                    exc,
+                )
+        else:
+            logger.debug(
+                "Rainfall skipped for site '%s' (no rainfall_start/end provided).",
+                self.site_name,
+            )
+
+        logger.info(
+            "compute_layers complete for site '%s': layers=%s",
+            self.site_name,
+            self.layers.available,
+        )
+        return self.layers
 
     # ------------------------------------------------------------------
     # openEO connection helper
@@ -474,8 +978,10 @@ class CatchmentSample:
         merged = green.merge_cubes(nir)
         ndwi = merged.reduce_dimension(
             dimension="bands",
-            reducer=lambda data: (data.array_element(0) - data.array_element(1))
-            / (data.array_element(0) + data.array_element(1)),
+            reducer=lambda data: (
+                (data.array_element(0) - data.array_element(1))
+                / (data.array_element(0) + data.array_element(1))
+            ),
         )
         logger.info("NDWI process applied (green=%s, nir=%s)", green_band, nir_band)
         return ndwi
@@ -611,8 +1117,10 @@ class CatchmentSample:
         merged = a.merge_cubes(b)
         result = merged.reduce_dimension(
             dimension="bands",
-            reducer=lambda data: (data.array_element(0) - data.array_element(1))
-            / (data.array_element(0) + data.array_element(1)),
+            reducer=lambda data: (
+                (data.array_element(0) - data.array_element(1))
+                / (data.array_element(0) + data.array_element(1))
+            ),
         )
         logger.info("%s applied (%s, %s)", label, band_a, band_b)
         return result
@@ -708,6 +1216,158 @@ class CatchmentSample:
         return {"west": west, "south": south, "east": east, "north": north}
 
     # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, path: Union[str, Path]) -> None:
+        """Save this Sample to a directory on disk.
+
+        The directory will contain the following files:
+
+        - ``metadata.json`` — the observation row serialised as JSON.
+        - ``catchment.wkt`` — the catchment polygon as WKT (omitted when
+          no catchment is present).
+        - ``layers/topography.nc`` — topography :class:`xarray.DataArray`
+          as NetCDF (omitted when not yet computed).
+        - ``layers/slope.nc`` — slope :class:`xarray.DataArray` as NetCDF
+          (omitted when not yet computed).
+        - ``layers/soil_type.json`` — soil-type :class:`pandas.Series` as
+          JSON (omitted when not yet computed).
+        - ``layers/rainfall.nc`` — rainfall :class:`xarray.DataArray` as
+          NetCDF (omitted when not yet computed).
+
+        Parameters
+        ----------
+        path : str or Path
+            Directory to write into.  Created (including any missing
+            parents) if it does not already exist.
+        """
+        from shapely import wkt as shapely_wkt
+
+        root = Path(path)
+        root.mkdir(parents=True, exist_ok=True)
+
+        # 1. Observation-row metadata
+        (root / "metadata.json").write_text(self._row.to_json(), encoding="utf-8")
+        logger.debug("Saved metadata to %s", root / "metadata.json")
+
+        # 2. Catchment geometry
+        if self.has_catchment:
+            geom = self.catchment
+            assert geom is not None  # guaranteed by has_catchment check above
+            wkt_text = shapely_wkt.dumps(geom)
+            (root / "catchment.wkt").write_text(wkt_text, encoding="utf-8")
+            logger.debug("Saved catchment geometry to %s", root / "catchment.wkt")
+
+        # 3. Computed spatial layers
+        layers_dir = root / "layers"
+
+        if self.layers.topography is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.topography
+            if da.name is None:
+                da = da.rename("topography")
+            da.to_netcdf(layers_dir / "topography.nc")
+            logger.debug("Saved topography layer to %s", layers_dir / "topography.nc")
+
+        if self.layers.slope is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.slope
+            if da.name is None:
+                da = da.rename("slope")
+            da.to_netcdf(layers_dir / "slope.nc")
+            logger.debug("Saved slope layer to %s", layers_dir / "slope.nc")
+
+        if self.layers.soil_type is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            (layers_dir / "soil_type.json").write_text(
+                self.layers.soil_type.to_json(), encoding="utf-8"
+            )
+            logger.debug("Saved soil_type layer to %s", layers_dir / "soil_type.json")
+
+        if self.layers.rainfall is not None:
+            layers_dir.mkdir(parents=True, exist_ok=True)
+            da = self.layers.rainfall
+            if da.name is None:
+                da = da.rename("rainfall")
+            da.to_netcdf(layers_dir / "rainfall.nc")
+            logger.debug("Saved rainfall layer to %s", layers_dir / "rainfall.nc")
+
+        logger.info("Sample '%s' saved to %s", self.id, root)
+
+    @classmethod
+    def load(cls, path: Union[str, Path]) -> "Sample":
+        """Load a :class:`Sample` that was previously saved with :meth:`save`.
+
+        Parameters
+        ----------
+        path : str or Path
+            Directory written by :meth:`save`.
+
+        Returns
+        -------
+        Sample
+            A fully reconstructed instance, including any spatial layers
+            that were present when :meth:`save` was called.
+
+        Raises
+        ------
+        FileNotFoundError
+            If *path* is not a directory or ``metadata.json`` is missing.
+        """
+        import xarray
+        from shapely import wkt as shapely_wkt
+
+        root = Path(path)
+        if not root.is_dir():
+            raise FileNotFoundError(f"No such directory: {root}")
+
+        metadata_path = root / "metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"metadata.json not found in {root}. Is this a valid Sample directory?"
+            )
+
+        # 1. Observation-row metadata
+        row = pd.read_json(metadata_path, typ="series", dtype=False, convert_dates=False)
+        logger.debug("Loaded metadata from %s", metadata_path)
+
+        # 2. Catchment geometry
+        catchment: Optional[BaseGeometry] = None
+        wkt_path = root / "catchment.wkt"
+        if wkt_path.exists():
+            catchment = shapely_wkt.loads(wkt_path.read_text(encoding="utf-8"))
+            logger.debug("Loaded catchment geometry from %s", wkt_path)
+
+        sample = cls(row, catchment)
+
+        # 3. Computed spatial layers
+        layers_dir = root / "layers"
+        if layers_dir.is_dir():
+            topo_path = layers_dir / "topography.nc"
+            if topo_path.exists():
+                sample.layers.topography = xarray.open_dataarray(topo_path).load()
+                logger.debug("Loaded topography layer from %s", topo_path)
+
+            slope_path = layers_dir / "slope.nc"
+            if slope_path.exists():
+                sample.layers.slope = xarray.open_dataarray(slope_path).load()
+                logger.debug("Loaded slope layer from %s", slope_path)
+
+            soil_path = layers_dir / "soil_type.json"
+            if soil_path.exists():
+                sample.layers.soil_type = pd.read_json(soil_path, typ="series", dtype=False)
+                logger.debug("Loaded soil_type layer from %s", soil_path)
+
+            rainfall_path = layers_dir / "rainfall.nc"
+            if rainfall_path.exists():
+                sample.layers.rainfall = xarray.open_dataarray(rainfall_path).load()
+                logger.debug("Loaded rainfall layer from %s", rainfall_path)
+
+        logger.info("Sample '%s' loaded from %s", sample.id, root)
+        return sample
+
+    # ------------------------------------------------------------------
     # Dunder methods
     # ------------------------------------------------------------------
 
@@ -736,6 +1396,11 @@ class CatchmentSample:
             f"  Flow acc    : {self.flow_acc_at_pour_point} cells"
         )
 
+
+# Public alias — the class was originally prototyped as "Sample" but all
+# external code (notebooks, type hints, from_gpkg) refers to it as
+# "CatchmentSample".  Both names are exported so either works.
+CatchmentSample = Sample
 
 # ---------------------------------------------------------------------------
 # CatchmentDataset

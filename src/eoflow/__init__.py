@@ -1,6 +1,6 @@
 from eoflow.config import Config
 from eoflow.log_utils import setup_logging
-from eoflow.samples import CatchmentDataset, CatchmentSample
+from eoflow.samples import CatchmentDataset, Sample
 from eoflow.utils import PROJECT_ROOT
 
 __all__ = [
