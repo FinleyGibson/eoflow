@@ -1271,6 +1271,7 @@ def _make_index_overlay(
     vmax: float = 1.0,
     alpha: float | None = None,
     fallback_bbox: tuple[float, float, float, float] | None = None,
+    catchment: Polygon | MultiPolygon | None = None,
 ) -> "folium.raster_layers.ImageOverlay | None":
     """Create a Folium :class:`~folium.raster_layers.ImageOverlay` from an
     EO index DataArray (e.g. NDVI, NDWI).
@@ -1455,6 +1456,31 @@ def _make_index_overlay(
     # Make NaN pixels fully transparent
     rgba[~np.isfinite(da.values.astype(float)), 3] = 0
 
+    # ── 6. Clip to catchment polygon ─────────────────────────────────────────
+    # The DataArray covers the full openEO download extent; zero-out pixels
+    # outside the catchment so only the watershed area is coloured.
+    if catchment is not None:
+        try:
+            import rasterio.features
+            import rasterio.transform
+
+            H, W = rgba.shape[:2]
+            # Build an Affine transform aligning pixel grid with WGS-84 bounds.
+            # rasterio convention: from_bounds(west, south, east, north, w, h)
+            # → pixel (row=0, col=0) = top-left = (north, west), matching our
+            # north-up RGBA array.
+            transform = rasterio.transform.from_bounds(_lon_min, _lat_min, _lon_max, _lat_max, W, H)
+            # geometry_mask returns True where OUTSIDE the geometry
+            outside = rasterio.features.geometry_mask(
+                [catchment.__geo_interface__],
+                out_shape=(H, W),
+                transform=transform,
+                invert=False,
+            )
+            rgba[outside, 3] = 0
+        except Exception:
+            pass  # fall back to unmasked on any error
+
     buf = io.BytesIO()
     plt.imsave(buf, rgba, format="png")
     buf.seek(0)
@@ -1562,12 +1588,15 @@ def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
     # they are handled by _make_index_overlay rather than make_raster_overlay.
     _catchment_bbox = sample.catchment_bbox() if hasattr(sample, "catchment_bbox") else None
 
+    _catchment_geom = getattr(sample, "catchment", None)
+
     if getattr(sl, "ndvi", None) is not None:
         overlay = _make_index_overlay(
             sl.ndvi,
             cmap=_get("colormaps", "ndvi", "RdYlGn"),
             label="NDVI (mean)",
             fallback_bbox=_catchment_bbox,
+            catchment=_catchment_geom,
         )
         if overlay is not None:
             layers["NDVI (mean)"] = overlay
@@ -1578,6 +1607,7 @@ def _layers_from_sample(sample, *, clip_soil: bool = True) -> dict:
             cmap=_get("colormaps", "ndwi", "RdBu"),
             label="NDWI (mean)",
             fallback_bbox=_catchment_bbox,
+            catchment=_catchment_geom,
         )
         if overlay is not None:
             layers["NDWI (mean)"] = overlay
