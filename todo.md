@@ -92,28 +92,29 @@
         - [x] Pick two points, one downstream of another
         - [x] Test to check
             - One catchment subsumes another
-    - [ ] ~~Use pygis~~
 - [x] Modify Albert's scripts to get rainfall data
     - [x] Fix aws command line tool on my local machine
     - [x] Run in command line.
     - [x] Run from python.
-    - [ ] Add method to Sample class.
-- [ ] Incorporate soil type classification:
+    - [x] Add method to Sample class.
+- [x] Incorporate soil type classification:
     - leave this until the model pipeline is working.
     - [x] Check meeting chat for soil data source.
     - [x] Obtain soil data from Cranfield, BGS Soil Observatory, and FEH/CEH sources.
         - Download once for offline access
     - [x] Calculate fractional coverage of the 26 soil types per catchment.
-    - [ ] Option to use only polygon intersection
-    - [ ] Add new map to visualise internal polygons.
-- [ ] Include MET office high-dimensional rainfall data
-    - [ ] Move from script to library
+    - [x] Option to use only polygon intersection
+    - [x] Add new map to visualise internal polygons.
+- [x] Include MET office high-dimensional rainfall data
+    - [x] Move from script to library
         - Query by shape
-    - [ ] Make notebook demo of rainfall
-- [ ] Combine all components into Datapoint Class
-    - Topography
-    - Slope
-    - Soil
-    - EO
-    - Rainfall
-    -
+    - [x] Make notebook demo of rainfall
+- [x] Combine all components into Datapoint Class
+    - [x] Topography
+    - [x] Slope
+    - [x] Aspect
+    - [x] Soil
+    - [x] EO
+    - [x] Rainfall
+- [ ] Feature extraction
+    - [ ] Extract some basic metrics from the data Sample objects.
