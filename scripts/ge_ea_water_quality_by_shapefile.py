@@ -1,25 +1,26 @@
 """
-Fetch water quality data from the Environment Agency API for Devon only.
+Fetch water quality data from the Environment Agency API for a region
+defined by a user-supplied shapefile.
 
 This script follows the same month-by-month checkpointed approach as
 :mod:`scripts.get_ea_water_quality`, but additionally filters each month's
-results to the Devon county boundary using
+results to a region boundary using
 :meth:`eoflow.ea.EAWaterQualityAPI.filter_by_polygon`.
 
 Because precanned EA area codes (e.g. ``environment_agency,SWX``) often
 return 400 errors, data is fetched without a geographic filter and then
-clipped to the Devon polygon extracted from a local shapefile.
+clipped to the polygon extracted from the supplied shapefile.
 
 Usage
 -----
     python -m scripts.get_devon_water_quality \
+        --shapefile data/my_region \
         --determinand 0076 \
         --start-date 2023-01-01 \
         --end-date 2023-12-31 \
-        --out data/devon_temperature_2023.csv
+        --out data/temperature_2023.csv
 
     # Optional flags
-        --shapefile data/devon_county       # path to Devon shapefile dir
         --delay 0.5                         # seconds between API requests
         --timeout 60                        # per-request timeout
         --checkpoint-dir .checkpoints       # where to keep state files
@@ -27,18 +28,18 @@ Usage
 
 Checkpoint / crash-recovery
 ---------------------------
-Each run derives a deterministic *run key* from (determinand, start_date,
-end_date, "devon").  Completed months are recorded in a JSON state file
-under ``--checkpoint-dir``.  If the script is re-started with the same
-parameters, it skips already-fetched months and appends only the missing
-ones to the output CSV.
+Each run derives a deterministic *run key* from (determinand, shapefile
+path, start_date, end_date).  Completed months are recorded in a JSON
+state file under ``--checkpoint-dir``.  If the script is re-started with
+the same parameters, it skips already-fetched months and appends only the
+missing ones to the output CSV.
 
 Common determinand codes
 ------------------------
-* ``0076`` – Temperature of Water
-* ``0077`` – Conductivity at 25 °C
-* ``0180`` – Orthophosphate, reactive as P
-* ``6396`` – Turbidity (NTU)
+* ``0076`` -- Temperature of Water
+* ``0077`` -- Conductivity at 25 °C
+* ``0180`` -- Orthophosphate, reactive as P
+* ``6396`` -- Turbidity (NTU)
 """
 
 from __future__ import annotations
@@ -60,9 +61,6 @@ from eoflow.log_utils import get_logger
 from eoflow.utils import load_shapefile
 
 logger = get_logger(__name__)
-
-# Default shapefile path (relative to the repository root)
-_DEFAULT_SHAPEFILE = Path(__file__).resolve().parent.parent / "data" / "devon_county"
 
 # ---------------------------------------------------------------------------
 # Polygon helpers
@@ -99,8 +97,8 @@ def extract_polygon_from_geodataframe(
     return coords
 
 
-def load_devon_polygon(shapefile_path: Path) -> List[Tuple[float, float]]:
-    """Load the Devon county shapefile and return its polygon in WGS84.
+def load_region_polygon(shapefile_path: Path) -> List[Tuple[float, float]]:
+    """Load a shapefile and return its polygon in WGS84.
 
     Parameters
     ----------
@@ -120,7 +118,7 @@ def load_devon_polygon(shapefile_path: Path) -> List[Tuple[float, float]]:
         gdf = gdf.to_crs("EPSG:4326")
 
     polygon_coords = extract_polygon_from_geodataframe(gdf)
-    logger.info("Devon polygon extracted: %d vertices", len(polygon_coords))
+    logger.info("Region polygon extracted: %d vertices", len(polygon_coords))
     return polygon_coords
 
 
@@ -133,16 +131,17 @@ _STATE_VERSION = 1
 
 def _run_key(
     determinand: str,
+    shapefile_path: str,
     start_date: str,
     end_date: str,
 ) -> str:
     """Return a short, filesystem-safe hash identifying a unique run."""
-    raw = f"{determinand}|devon|{start_date}|{end_date}"
+    raw = f"{determinand}|{shapefile_path}|{start_date}|{end_date}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _state_path(checkpoint_dir: Path, key: str) -> Path:
-    return checkpoint_dir / f"devon_wq_{key}.state.json"
+    return checkpoint_dir / f"wq_region_{key}.state.json"
 
 
 def _load_state(path: Path) -> Dict[str, Any]:
@@ -181,22 +180,22 @@ def _append_csv(df: pd.DataFrame, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def fetch_devon_water_quality(
+def fetch_water_quality(
     determinand: str,
     start_date: str,
     end_date: str,
     output_path: Path,
     *,
-    shapefile_path: Path = _DEFAULT_SHAPEFILE,
+    shapefile_path: Path,
     delay: float = 0.5,
     timeout: int = 60,
     checkpoint_dir: Path = Path(".checkpoints"),
     verbose: bool = True,
 ) -> pd.DataFrame:
-    """Download EA water quality data for Devon month-by-month with checkpointing.
+    """Download EA water quality data for a shapefile region month-by-month with checkpointing.
 
     Data is fetched from the EA API without a geographic filter, then
-    filtered to the Devon county boundary using
+    filtered to the region boundary using
     :meth:`~eoflow.ea.EAWaterQualityAPI.filter_by_polygon`.
 
     Parameters
@@ -208,7 +207,8 @@ def fetch_devon_water_quality(
     output_path : Path
         Destination CSV file.  Data is appended after each month.
     shapefile_path : Path
-        Path to the Devon county shapefile (directory or ``.shp`` file).
+        Path to a shapefile defining the region of interest (directory or
+        ``.shp`` file).
     delay : float
         Seconds to wait between API requests.
     timeout : int
@@ -224,20 +224,20 @@ def fetch_devon_water_quality(
         The combined data (all months, including previously checkpointed ones).
     """
     # ------------------------------------------------------------------
-    # Load the Devon polygon
+    # Load the region polygon
     # ------------------------------------------------------------------
     if verbose:
-        print(f"\nLoading Devon boundary from {shapefile_path} …")
+        print(f"\nLoading region boundary from {shapefile_path} …")
 
-    polygon_coords = load_devon_polygon(shapefile_path)
+    polygon_coords = load_region_polygon(shapefile_path)
 
     if verbose:
-        print(f"  ✓ Devon polygon loaded ({len(polygon_coords)} vertices)")
+        print(f"  ✓ Region polygon loaded ({len(polygon_coords)} vertices)")
 
     # ------------------------------------------------------------------
     # Set up checkpointing
     # ------------------------------------------------------------------
-    key = _run_key(determinand, start_date, end_date)
+    key = _run_key(determinand, str(shapefile_path), start_date, end_date)
     state_file = _state_path(checkpoint_dir, key)
     state = _load_state(state_file)
     completed = _completed_set(state)
@@ -257,11 +257,13 @@ def fetch_devon_water_quality(
     n_fetched = 0
     n_records = 0
 
+    region_label = Path(shapefile_path).stem
+
     if verbose:
-        print("\nDevon Water Quality data download")
+        print("\nWater Quality data download")
         print(f"  Determinand : {determinand}")
         print(f"  Date range  : {start_date} → {end_date}")
-        print("  Region      : Devon (polygon filter)")
+        print(f"  Region      : {region_label} (polygon filter)")
         print(f"  Output      : {output_path}")
         print(f"  Months      : {n_total}")
         already = len(completed)
@@ -303,7 +305,7 @@ def fetch_devon_water_quality(
             df = df.dropna(subset=["result"])
 
             if not df.empty:
-                # Filter to Devon polygon
+                # Filter to region polygon
                 try:
                     df = api.filter_by_polygon(df=df, polygon=polygon_coords)
                 except Exception as exc:
@@ -323,7 +325,7 @@ def fetch_devon_water_quality(
         _save_state(state_file, state)
 
         if verbose:
-            logger.info("  ✓ %d records in Devon", rows)
+            logger.info("  ✓ %d records in region", rows)
 
         # Polite delay between requests (skip after last month).
         if idx < n_total:
@@ -338,7 +340,7 @@ def fetch_devon_water_quality(
         print("Download complete")
         print(f"  Months fetched this run : {n_fetched}")
         print(f"  Months skipped (cached) : {n_skipped}")
-        print(f"  Records written (Devon) : {n_records}")
+        print(f"  Records in region       : {n_records}")
         if output_path.exists():
             print(f"  Output file             : {output_path}")
         print("=" * 60)
@@ -350,7 +352,7 @@ def fetch_devon_water_quality(
         logger.info("Total records in output file: %d", len(combined))
         return combined
 
-    logger.warning("No data collected for Devon.")
+    logger.warning("No data collected for the specified region.")
     return pd.DataFrame()
 
 
@@ -362,9 +364,15 @@ def fetch_devon_water_quality(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Download water quality data from the Environment Agency API "
-        "filtered to the Devon county boundary, with automatic "
+        "filtered to a region defined by a shapefile, with automatic "
         "checkpointing and crash recovery.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--shapefile",
+        type=Path,
+        required=True,
+        help="Path to a shapefile defining the region of interest (directory or .shp file).",
     )
     p.add_argument(
         "--determinand",
@@ -388,14 +396,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path("devon_water_quality.csv"),
+        default=Path("water_quality.csv"),
         help="Output CSV path.",
-    )
-    p.add_argument(
-        "--shapefile",
-        type=Path,
-        default=_DEFAULT_SHAPEFILE,
-        help="Path to the Devon county shapefile (directory or .shp file).",
     )
     p.add_argument(
         "--delay",
@@ -445,7 +447,7 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
 
     try:
-        fetch_devon_water_quality(
+        fetch_water_quality(
             determinand=args.determinand,
             start_date=args.start_date,
             end_date=args.end_date,
