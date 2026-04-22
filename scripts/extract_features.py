@@ -25,14 +25,13 @@ Usage
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import pandas as pd
 
+from eoflow.features import extract_features_batch
 from eoflow.log_utils import get_logger
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
-from eoflow.features import extract_features_batch
 
 logger = get_logger("eoflow.scripts.extract_features")
 
@@ -154,7 +153,9 @@ def main(argv: list[str] | None = None) -> None:
             df.to_parquet(parquet_path, index=False)
             logger.info("Saved Parquet → %s", parquet_path)
         except ImportError:
-            logger.warning("pyarrow/fastparquet not installed — Parquet skipped. pip install pyarrow")
+            logger.warning(
+                "pyarrow/fastparquet not installed — Parquet skipped. pip install pyarrow"
+            )
 
     # ── Summary report ───────────────────────────────────────────────────
     _print_summary(df, args.output)
@@ -176,11 +177,16 @@ def _print_summary(df: pd.DataFrame, output_path: Path) -> None:
 
     # Feature-group breakdown
     groups = {
-        "Identity / target": ["notation", "site_name", "date", "result", "unit",
-                               "flow_acc_at_pour_point_log"],
+        "Identity / target": [
+            "notation",
+            "site_name",
+            "date",
+            "result",
+            "unit",
+            "flow_acc_at_pour_point_log",
+        ],
         "Geometry": [c for c in df.columns if c.startswith("catchment_")],
-        "Terrain": [c for c in df.columns
-                    if c.startswith(("elevation_", "slope_", "aspect_"))],
+        "Terrain": [c for c in df.columns if c.startswith(("elevation_", "slope_", "aspect_"))],
         "NDVI": [c for c in df.columns if c.startswith("ndvi_")],
         "NDWI": [c for c in df.columns if c.startswith("ndwi_")],
         "Soil": [c for c in df.columns if c.startswith("soil_")],
@@ -196,7 +202,7 @@ def _print_summary(df: pd.DataFrame, output_path: Path) -> None:
     # Sample row (first row, numeric only)
     if not df.empty:
         row0 = numeric.iloc[0].dropna()
-        print(f"  Sample row (first, non-NaN values):")
+        print("  Sample row (first, non-NaN values):")
         for col, val in row0.items():
             print(f"    {col:<45s} {val:.6g}")
     print(sep)
