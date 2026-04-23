@@ -116,5 +116,25 @@
     - [x] Soil
     - [x] EO
     - [x] Rainfall
-- [ ] Feature extraction
-    - [ ] Extract some basic metrics from the data Sample objects.
+- [x] Feature extraction
+    - [x] Extract some basic metrics from the data Sample objects.
+- [ ] Handle temporal component
+    - [ ] Investigate temporal resolution of data
+    - [ ] Ensure full temporal data is being computed
+    - [ ] Just constant window?
+    - Weighted window?
+    - How do we configure window resolution?
+
+- [ ] Enhance the feature extraction
+    - [ ] Define Desired metrics
+        - Slope
+        - Direction
+        - Land use
+        - Bare earth
+        -
+    - [ ] Implement individual components
+    - [ ] Implement overlaps
+
+- [ ] Weightings
+    - [ ] Euclidean distance from sample
+    - [ ] Graph flow distance
