@@ -50,3 +50,9 @@ sh -c 'uv run scripts/dataset_builder.py --csv assets/turbidity_samples/ea_turbi
 
 Note: Wrapped in` sh -c` to set $1 to 00 in case it needs repeating.
 Note: This ignores duplicate locations
+
+## 5. Compute layers
+
+```bash
+uv run scripts/prepare_samples.py --gpkg assets/sample_catchments/ea_turbidity_2010-2024_catchments_00.gpkg --dem assets/devon_dem_cop30.tif --out-dir outputs/layered_samples/ea_samples_2010-2024_catchments_00.gpkg --rainfall-start 2010-01-01 --rainfall-end 2023-12-31 --eo-start 2010-01-01 --eo-end 2023-12-31
+```

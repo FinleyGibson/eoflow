@@ -138,3 +138,16 @@
 - [ ] Weightings
     - [ ] Euclidean distance from sample
     - [ ] Graph flow distance
+
+- [ ] Restructure
+    - To be done in tandem with Docker integration
+    - Need to have two distinct systems
+        - Using locally provided data
+        - Update with new data
+    - [ ] Move to query for whole CS shapefile
+        - [ ] Rainfall
+    - [ ] Locally Provided data
+        - [ ] Add option to dataset builder to instead use data referenced from Albert's file system
+        - [ ] Test this works
+        - [ ]
+    - [ ] Update with new data

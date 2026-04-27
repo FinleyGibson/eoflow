@@ -32,7 +32,6 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from eoflow.log_utils import get_logger
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
@@ -159,7 +158,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
 
     # Lazy imports so --help is fast
-    from eoflow.samples import CatchmentDataset, Sample
+    from eoflow.samples import CatchmentDataset
 
     logger.info("=" * 60)
     logger.info("Prepare sample instances")
@@ -198,9 +197,7 @@ def main(argv=None):
             conn = Sample.connect_openeo()
             logger.info("openEO connection established.")
         except Exception as exc:
-            logger.warning(
-                "Could not connect to openEO -- EO fetch will be skipped: %s", exc
-            )
+            logger.warning("Could not connect to openEO -- EO fetch will be skipped: %s", exc)
 
     # -- Process each sample -----------------------------------------------
     n_total = len(ds)
