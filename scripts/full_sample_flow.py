@@ -738,6 +738,523 @@ def _plot_sample_layers(
     logger.info("Layer plot saved to %s", output_path)
 
 
+def _plot_presentation_tile(
+    cs: Sample,
+    output_path: Path,
+    *,
+    dem_path: Path | None = None,
+) -> None:
+    """Create a 2x2 tiled image of flow accumulation, aspect, soil type, and NDVI.
+
+    Designed for presentation use with clean, compact layout.
+
+    Parameters
+    ----------
+    cs : Sample
+        A fully populated sample (catchment + layers).
+    output_path : Path
+        Destination PNG file.
+    dem_path : Path, optional
+        Path to the DEM GeoTIFF for flow accumulation computation.
+    """
+    from pyproj import Transformer
+
+    from eoflow.soil import SEARG_COLOURS
+
+    if not cs.has_catchment:
+        logger.warning("Sample has no catchment polygon — skipping presentation tile plot.")
+        return
+
+    catchment_wgs84 = cs.catchment
+    assert catchment_wgs84 is not None
+
+    # Reproject catchment to BNG
+    catchment_bng_gs = gpd.GeoSeries([catchment_wgs84], crs="EPSG:4326").to_crs("EPSG:27700")  # type: ignore[call-overload]
+    catchment_bng = catchment_bng_gs.iloc[0]
+    catchment_wgs84_gs = gpd.GeoSeries([catchment_wgs84], crs="EPSG:4326")  # type: ignore[call-overload]
+
+    bbox_bng = catchment_bng.bounds
+    bbox_wgs = catchment_wgs84.bounds
+
+    # Helper functions
+    def _bng_buf(frac: float = 0.08):  # Smaller buffer for compact layout
+        """Return (xlo, xhi, ylo, yhi) BNG limits with fractional padding."""
+        dx = (bbox_bng[2] - bbox_bng[0]) * frac
+        dy = (bbox_bng[3] - bbox_bng[1]) * frac
+        return bbox_bng[0] - dx, bbox_bng[2] + dx, bbox_bng[1] - dy, bbox_bng[3] + dy
+
+    def _wgs_buf(frac: float = 0.08):  # Smaller buffer for compact layout
+        """Return (xlo, xhi, ylo, yhi) WGS-84 limits with fractional padding."""
+        dx = (bbox_wgs[2] - bbox_wgs[0]) * frac
+        dy = (bbox_wgs[3] - bbox_wgs[1]) * frac
+        return bbox_wgs[0] - dx, bbox_wgs[2] + dx, bbox_wgs[1] - dy, bbox_wgs[3] + dy
+
+    def _boundary_bng(ax: plt.Axes) -> None:  # type: ignore[name-defined]
+        """Draw catchment boundary on BNG axis."""
+        catchment_bng_gs.plot(
+            ax=ax,
+            facecolor="none",
+            edgecolor="#000000",
+            linewidth=1.2,
+            zorder=10,
+        )
+
+    def _boundary_wgs84(ax: plt.Axes) -> None:  # type: ignore[name-defined]
+        """Draw catchment boundary on WGS-84 axis."""
+        catchment_wgs84_gs.plot(
+            ax=ax,
+            facecolor="none",
+            edgecolor="#000000",
+            linewidth=1.2,
+            zorder=10,
+        )
+
+    # Create 2x2 figure with tight layout
+    fig, axes = plt.subplots(2, 2, figsize=(10, 10), squeeze=False)
+
+    sl = cs.layers
+
+    # ===== Panel 1: Flow Accumulation (top-left) =====
+    ax1 = axes[0, 0]
+    if dem_path is not None:
+        try:
+            import rasterio.features as _rf
+            import rasterio.transform as _rt
+
+            from eoflow.catchment import compute_flow_accumulation
+
+            acc_arr, acc_tf, _ = compute_flow_accumulation(dem_path)
+            H_dem, W_dem = acc_arr.shape
+
+            # Crop to catchment bbox
+            _pad = 5
+            col_s = max(0, int((bbox_wgs[0] - acc_tf.c) / acc_tf.a) - _pad)
+            col_e = min(W_dem, int((bbox_wgs[2] - acc_tf.c) / acc_tf.a) + _pad)
+            row_s = max(0, int((bbox_wgs[3] - acc_tf.f) / acc_tf.e) - _pad)
+            row_e = min(H_dem, int((bbox_wgs[1] - acc_tf.f) / acc_tf.e) + _pad)
+
+            acc_crop = acc_arr[row_s:row_e, col_s:col_e].copy()
+
+            cx_min = acc_tf.c + col_s * acc_tf.a
+            cx_max = acc_tf.c + col_e * acc_tf.a
+            cy_max = acc_tf.f + row_s * acc_tf.e
+            cy_min = acc_tf.f + row_e * acc_tf.e
+
+            log_acc = np.log1p(acc_crop)
+
+            # Mask outside catchment
+            Hc, Wc = acc_crop.shape
+            affine_crop = _rt.from_bounds(cx_min, cy_min, cx_max, cy_max, Wc, Hc)
+            outside = _rf.geometry_mask(
+                [catchment_wgs84.__geo_interface__],
+                out_shape=(Hc, Wc),
+                transform=affine_crop,
+                invert=False,
+            )
+            log_acc[outside] = np.nan
+
+            xlo, xhi, ylo, yhi = _wgs_buf()
+            ax1.set_xlim(xlo, xhi)
+            ax1.set_ylim(ylo, yhi)
+
+            cmap_acc = plt.get_cmap("Blues").copy()
+            cmap_acc.set_bad(alpha=0.0)
+            im_acc = ax1.imshow(
+                log_acc,
+                extent=(cx_min, cx_max, cy_min, cy_max),
+                origin="upper",
+                cmap=cmap_acc,
+                aspect="auto",
+                alpha=0.90,
+                zorder=2,
+            )
+            cbar1 = plt.colorbar(im_acc, ax=ax1, shrink=0.85, pad=0.02)
+            cbar1.set_label("Flow Accumulation\n(log scale)", fontsize=8)
+            cbar1.ax.tick_params(labelsize=7)
+            _boundary_wgs84(ax1)
+            ax1.set_title("Flow Accumulation", fontsize=10, fontweight="bold", pad=8)
+            ax1.tick_params(labelsize=7)
+            ax1.set_xlabel("", fontsize=1)  # Minimize labels
+            ax1.set_ylabel("", fontsize=1)
+        except Exception as exc:
+            logger.warning(f"Flow accumulation rendering failed: {exc}")
+            ax1.text(
+                0.5,
+                0.5,
+                "Flow Accumulation\nNot Available",
+                ha="center",
+                va="center",
+                transform=ax1.transAxes,
+                fontsize=10,
+            )
+            ax1.set_xlim(0, 1)
+            ax1.set_ylim(0, 1)
+            ax1.axis("off")
+    else:
+        ax1.text(
+            0.5,
+            0.5,
+            "Flow Accumulation\nNot Available",
+            ha="center",
+            va="center",
+            transform=ax1.transAxes,
+            fontsize=10,
+        )
+        ax1.set_xlim(0, 1)
+        ax1.set_ylim(0, 1)
+        ax1.axis("off")
+
+    # ===== Panel 2: Aspect (top-right) =====
+    ax2 = axes[0, 1]
+    if sl.aspect is not None:
+        try:
+            vals = sl.aspect.values.astype(float)
+            x_c = sl.aspect.coords["x"].values
+            y_c = sl.aspect.coords["y"].values
+
+            extent = (
+                float(x_c.min()),
+                float(x_c.max()),
+                float(y_c.min()),
+                float(y_c.max()),
+            )
+
+            xlo, xhi, ylo, yhi = _bng_buf()
+            ax2.set_xlim(xlo, xhi)
+            ax2.set_ylim(ylo, yhi)
+
+            im2 = ax2.imshow(
+                vals,
+                extent=extent,
+                origin="lower",
+                cmap="twilight",
+                vmin=0.0,
+                vmax=360.0,
+                aspect="auto",
+                interpolation="nearest",
+                alpha=0.90,
+                zorder=2,
+            )
+            cbar2 = plt.colorbar(im2, ax=ax2, shrink=0.85, pad=0.02)
+            cbar2.set_label("Aspect (°)", fontsize=8)
+            cbar2.ax.tick_params(labelsize=7)
+            _boundary_bng(ax2)
+            ax2.set_title("Aspect", fontsize=10, fontweight="bold", pad=8)
+            ax2.tick_params(labelsize=7)
+            ax2.set_xlabel("", fontsize=1)
+            ax2.set_ylabel("", fontsize=1)
+        except Exception as exc:
+            logger.warning(f"Aspect rendering failed: {exc}")
+            ax2.text(
+                0.5,
+                0.5,
+                "Aspect\nNot Available",
+                ha="center",
+                va="center",
+                transform=ax2.transAxes,
+                fontsize=10,
+            )
+            ax2.set_xlim(0, 1)
+            ax2.set_ylim(0, 1)
+            ax2.axis("off")
+    else:
+        ax2.text(
+            0.5,
+            0.5,
+            "Aspect\nNot Available",
+            ha="center",
+            va="center",
+            transform=ax2.transAxes,
+            fontsize=10,
+        )
+        ax2.set_xlim(0, 1)
+        ax2.set_ylim(0, 1)
+        ax2.axis("off")
+
+    # ===== Panel 3: Soil Type (bottom-left) =====
+    ax3 = axes[1, 0]
+    if sl.soil_polygons is not None and not sl.soil_polygons.empty:
+        try:
+            soil_gdf = sl.soil_polygons.copy()
+
+            # Clip to catchment
+            try:
+                clipped = soil_gdf.copy()
+                clipped["geometry"] = soil_gdf.geometry.intersection(catchment_bng)
+                soil_gdf = clipped[
+                    clipped.geometry.notna() & ~clipped.geometry.is_empty
+                ].reset_index(drop=True)
+            except Exception:
+                pass
+
+            xlo, xhi, ylo, yhi = _bng_buf()
+            ax3.set_xlim(xlo, xhi)
+            ax3.set_ylim(ylo, yhi)
+            ax3.set_aspect("equal", adjustable="datalim")
+
+            present_groups = soil_gdf["SEARG_Concise"].dropna().unique()
+            for group in present_groups:
+                colour = SEARG_COLOURS.get(str(group), "#808080")
+                subset = soil_gdf[soil_gdf["SEARG_Concise"] == group]
+                subset.plot(
+                    ax=ax3, color=colour, edgecolor="none", linewidth=0, alpha=0.85, zorder=2
+                )
+
+            _boundary_bng(ax3)
+
+            # Compact legend
+            legend_patches = [
+                mpatches.Patch(
+                    color=SEARG_COLOURS.get(str(g), "#808080"),
+                    label=str(g)[:20],  # Truncate long labels
+                )
+                for g in present_groups
+            ]
+            ax3.legend(
+                handles=legend_patches,
+                loc="lower right",
+                fontsize=6,
+                framealpha=0.90,
+                title="Soil Type",
+                title_fontsize=7,
+                borderpad=0.4,
+            )
+            ax3.set_title("Soil Type", fontsize=10, fontweight="bold", pad=8)
+            ax3.tick_params(labelsize=7)
+            ax3.set_xlabel("", fontsize=1)
+            ax3.set_ylabel("", fontsize=1)
+        except Exception as exc:
+            logger.warning(f"Soil type rendering failed: {exc}")
+            ax3.text(
+                0.5,
+                0.5,
+                "Soil Type\nNot Available",
+                ha="center",
+                va="center",
+                transform=ax3.transAxes,
+                fontsize=10,
+            )
+            ax3.set_xlim(0, 1)
+            ax3.set_ylim(0, 1)
+            ax3.axis("off")
+    else:
+        ax3.text(
+            0.5,
+            0.5,
+            "Soil Type\nNot Available",
+            ha="center",
+            va="center",
+            transform=ax3.transAxes,
+            fontsize=10,
+        )
+        ax3.set_xlim(0, 1)
+        ax3.set_ylim(0, 1)
+        ax3.axis("off")
+
+    # ===== Panel 4: NDVI (bottom-right) =====
+    ax4 = axes[1, 1]
+    if sl.ndvi is not None:
+        try:
+            from pyproj import Transformer
+
+            da = sl.ndvi
+
+            # Handle object dtype
+            if not np.issubdtype(da.dtype, np.floating):
+                raw = da.values
+                if raw.dtype.kind == "O":
+
+                    def _to_f_eo(v: object) -> float:
+                        if v in (b"", b"nan", "", None):
+                            return np.nan
+                        try:
+                            return float(np.float32(v))  # type: ignore[arg-type]
+                        except (ValueError, TypeError):
+                            return np.nan
+
+                    da = da.copy(data=np.vectorize(_to_f_eo)(raw).astype(np.float32))
+
+            # Drop 'variable' dimension
+            if "variable" in da.dims:
+                _META = {"crs", "spatial_ref", "crs_wkt"}
+                if "variable" in da.coords:
+                    data_slices = [
+                        str(v) for v in da.coords["variable"].values if str(v) not in _META
+                    ]
+                    da = (
+                        da.sel(variable=data_slices[0], drop=True)
+                        if data_slices
+                        else da.isel(variable=0, drop=True)
+                    )
+                else:
+                    da = da.isel(variable=0, drop=True)
+
+            # Collapse time
+            for time_dim in ("t", "time"):
+                if time_dim in da.dims:
+                    da = da.mean(dim=time_dim, skipna=True)
+                    break
+            da = da.squeeze(drop=True)
+
+            if da.ndim == 2:
+                # Get coordinates
+                y_c = np.linspace(0.0, 1.0, da.shape[0])
+                for yn in ("latitude", "lat", "y"):
+                    if yn in da.coords:
+                        y_c = da.coords[yn].values
+                        break
+                x_c = np.linspace(0.0, 1.0, da.shape[1])
+                for xn in ("longitude", "lon", "x"):
+                    if xn in da.coords:
+                        x_c = da.coords[xn].values
+                        break
+
+                x_min_v = float(x_c.min())
+                x_max_v = float(x_c.max())
+                y_min_v = float(y_c.min())
+                y_max_v = float(y_c.max())
+
+                # Determine CRS and WGS-84 extent
+                if -90.0 <= y_min_v and y_max_v <= 90.0:
+                    wgs_x_min, wgs_x_max = x_min_v, x_max_v
+                    wgs_y_min, wgs_y_max = y_min_v, y_max_v
+                elif (
+                    0.0 <= y_min_v
+                    and y_max_v <= 800_000.0
+                    and 0.0 <= x_min_v
+                    and x_max_v <= 800_000.0
+                ):
+                    tr_b = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
+                    c_lon, c_lat = tr_b.transform(
+                        [x_min_v, x_max_v, x_min_v, x_max_v],
+                        [y_min_v, y_min_v, y_max_v, y_max_v],
+                    )
+                    wgs_x_min, wgs_x_max = float(min(c_lon)), float(max(c_lon))
+                    wgs_y_min, wgs_y_max = float(min(c_lat)), float(max(c_lat))
+                else:
+                    _clon = catchment_wgs84.centroid.x
+                    _clat = catchment_wgs84.centroid.y
+                    _zone = int((_clon + 180.0) / 6.0) + 1
+                    _epsg = 32600 + _zone if _clat >= 0.0 else 32700 + _zone
+                    tr_u = Transformer.from_crs(f"EPSG:{_epsg}", "EPSG:4326", always_xy=True)
+                    c_lon, c_lat = tr_u.transform(
+                        [x_min_v, x_max_v, x_min_v, x_max_v],
+                        [y_min_v, y_min_v, y_max_v, y_max_v],
+                    )
+                    wgs_x_min, wgs_x_max = float(min(c_lon)), float(max(c_lon))
+                    wgs_y_min, wgs_y_max = float(min(c_lat)), float(max(c_lat))
+
+                # Mask outside catchment
+                vals = da.values.astype(float)
+                try:
+                    import rasterio.features
+                    import rasterio.transform
+
+                    H, W = vals.shape
+                    affine = rasterio.transform.from_bounds(
+                        wgs_x_min, wgs_y_min, wgs_x_max, wgs_y_max, W, H
+                    )
+                    outside = rasterio.features.geometry_mask(
+                        [catchment_wgs84.__geo_interface__],
+                        out_shape=(H, W),
+                        transform=affine,
+                        invert=False,
+                    )
+                    vals[outside] = np.nan
+                except Exception:
+                    pass
+
+                # Flip if needed
+                if len(y_c) > 1 and float(y_c[0]) > float(y_c[-1]):
+                    vals = vals[::-1, :]
+
+                # Auto-scale
+                finite = vals[np.isfinite(vals)]
+                vmin_use, vmax_use = -1.0, 1.0
+                if finite.size > 0:
+                    vmin_use = float(np.percentile(finite, 2))
+                    vmax_use = float(np.percentile(finite, 98))
+
+                wgs_extent = (wgs_x_min, wgs_x_max, wgs_y_min, wgs_y_max)
+
+                xlo, xhi, ylo, yhi = _wgs_buf()
+                ax4.set_xlim(xlo, xhi)
+                ax4.set_ylim(ylo, yhi)
+
+                cmap_masked = plt.get_cmap("RdYlGn").copy()
+                cmap_masked.set_bad(alpha=0.0)
+
+                im4 = ax4.imshow(
+                    vals,
+                    extent=wgs_extent,
+                    origin="lower",
+                    cmap=cmap_masked,
+                    vmin=vmin_use,
+                    vmax=vmax_use,
+                    aspect="auto",
+                    interpolation="nearest",
+                    alpha=0.90,
+                    zorder=2,
+                )
+                cbar4 = plt.colorbar(im4, ax=ax4, shrink=0.85, pad=0.02)
+                cbar4.set_label("NDVI", fontsize=8)
+                cbar4.ax.tick_params(labelsize=7)
+                _boundary_wgs84(ax4)
+                ax4.set_title("NDVI", fontsize=10, fontweight="bold", pad=8)
+                ax4.tick_params(labelsize=7)
+                ax4.set_xlabel("", fontsize=1)
+                ax4.set_ylabel("", fontsize=1)
+            else:
+                raise ValueError("NDVI data not 2D after processing")
+        except Exception as exc:
+            logger.warning(f"NDVI rendering failed: {exc}")
+            ax4.text(
+                0.5,
+                0.5,
+                "NDVI\nNot Available",
+                ha="center",
+                va="center",
+                transform=ax4.transAxes,
+                fontsize=10,
+            )
+            ax4.set_xlim(0, 1)
+            ax4.set_ylim(0, 1)
+            ax4.axis("off")
+    else:
+        ax4.text(
+            0.5,
+            0.5,
+            "NDVI\nNot Available",
+            ha="center",
+            va="center",
+            transform=ax4.transAxes,
+            fontsize=10,
+        )
+        ax4.set_xlim(0, 1)
+        ax4.set_ylim(0, 1)
+        ax4.axis("off")
+
+    # Overall figure title
+    try:
+        area_km2 = cs.catchment_area_km2()
+        area_str = f" — Area: {area_km2:.1f} km²" if area_km2 is not None else ""
+    except Exception:
+        area_str = ""
+
+    fig.suptitle(
+        f"{cs.site_name} ({cs.notation}){area_str}",
+        fontsize=13,
+        fontweight="bold",
+        y=0.995,
+    )
+
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Presentation tile plot saved to %s", output_path)
+
+
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
@@ -960,6 +1477,14 @@ def main():
     # legend where appropriate.
     layer_plot_path = PROJECT_ROOT / "outputs/sample_flow_layers.png"
     _plot_sample_layers(cs, layer_plot_path, dem_path=DATA_DIR / "dems/devon_dem_cop30.tif")
+
+    # 8. Presentation tile (2x2 compact layout)
+    # Produce a clean 2x2 tiled image with flow accumulation, aspect, soil type,
+    # and NDVI for use in presentations.
+    presentation_tile_path = PROJECT_ROOT / "outputs/sample_flow_presentation_tile.png"
+    _plot_presentation_tile(
+        cs, presentation_tile_path, dem_path=DATA_DIR / "dems/devon_dem_cop30.tif"
+    )
 
     logger.info(f"script {__file__} finished without error!")
 
