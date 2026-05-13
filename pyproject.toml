@@ -48,6 +48,7 @@ dev = [
 [project.scripts]
 eoflow-update-config = "scripts.update_config:main"
 eoflow-download-rainfall = "scripts.download_rainfall:main"
+eoflow-download-nimrod = "scripts.download_nimrod:main"
 eoflow-convert-rainfall = "scripts.convert_rainfall:main"
 
 [build-system]
