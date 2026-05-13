@@ -109,6 +109,18 @@
     - [x] Move from script to library
         - Query by shape
     - [x] Make notebook demo of rainfall
+- [ ] Move to using historic rainfall data
+    - [x] Download
+    - [x] Visualise in a script/notebook
+    - [x] Fix inversion issue
+    - [ ] Check layers.
+    - [ ] Update to correct area of interest.
+    - [x] Crop to specific shape
+    - [ ] Add option to dataset_builder.py
+    - [ ] Move data to server
+    - [ ] Run small test
+    - [ ] Run Final
+    - [ ] Review
 - [x] Combine all components into Datapoint Class
     - [x] Topography
     - [x] Slope
