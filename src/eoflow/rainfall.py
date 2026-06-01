@@ -41,17 +41,17 @@ This matches the naming convention used by ``trigger-aws.py`` so the
 
 from __future__ import annotations
 
+import gzip
+import shutil
+import tarfile
+import tempfile
 import threading
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import xarray
-
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import boto3
+import geopandas as gpd
 import iris
 import iris.analysis
 import iris.coord_systems
@@ -59,6 +59,10 @@ import iris.coords
 import iris.cube
 import numpy as np
 import rasterio
+import rasterio.features
+import rasterio.transform
+import requests
+import xarray as xr
 from botocore import UNSIGNED
 from botocore.config import Config
 from rasterio.transform import from_origin
@@ -951,7 +955,7 @@ def get_rainfall_for_polygon(
     res: int = DEFAULT_RESOLUTION_M,
     run_hour: int | None = None,
     workers: int = 4,
-) -> "xarray.DataArray":
+) -> xr.DataArray:
     """Get rainfall rate data clipped to a polygon for a given time range.
 
     Downloads UKV 2 km rainfall-rate NetCDF files from the Met Office AWS S3
@@ -1211,6 +1215,892 @@ def get_rainfall_for_polygon(
         if _tmp_dir is not None:
             shutil.rmtree(_tmp_dir, ignore_errors=True)
             logger.debug("Removed temporary download directory: %s", _tmp_dir)
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - constants
+# ---------------------------------------------------------------------------
+
+#: EPSG code for British National Grid, the native CRS of NIMROD 1km data.
+NIMROD_BNG_EPSG: int = 27700
+
+#: Base URL for the CEDA NIMROD 1km composite archive.
+CEDA_NIMROD_BASE_URL: str = "https://dap.ceda.ac.uk/badc/ukmo-nimrod/data/composite/uk-1km"
+
+#: Filename pattern for the daily NIMROD tar files on CEDA.
+NIMROD_FILE_PATTERN: str = "metoffice-c-band-rain-radar_uk_{date}_1km-composite.dat.gz.tar"
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - private CEDA download helpers
+# ---------------------------------------------------------------------------
+
+
+def _nimrod_generate_dates(start_date: date, end_date: date) -> list[date]:
+    """Return every date from *start_date* to *end_date* inclusive."""
+    dates: list[date] = []
+    current = start_date
+    while current <= end_date:
+        dates.append(current)
+        current += timedelta(days=1)
+    return dates
+
+
+def _nimrod_create_session() -> requests.Session:
+    """Return a ``requests.Session`` configured with CEDA credentials.
+
+    Authentication is resolved in priority order:
+
+    1. ``CEDA_TOKEN`` environment variable (Bearer token).
+    2. ``~/.netrc`` entry for ``dap.ceda.ac.uk``.
+    3. ``CEDA_USERNAME`` / ``CEDA_PASSWORD`` environment variables.
+    """
+    import os
+    from netrc import NetrcParseError, netrc
+
+    session = requests.Session()
+
+    token = os.environ.get("CEDA_TOKEN")
+    if token:
+        session.headers["Authorization"] = f"Bearer {token}"
+        logger.info("NIMROD: using CEDA Bearer token from $CEDA_TOKEN")
+        return session
+
+    try:
+        auth_info = netrc().authenticators("dap.ceda.ac.uk")
+        if auth_info:
+            username, _, password = auth_info
+            session.auth = (username, password)
+            logger.info("NIMROD: using .netrc credentials for user: %s", username)
+            return session
+    except (FileNotFoundError, NetrcParseError, TypeError):
+        pass
+
+    username = os.environ.get("CEDA_USERNAME")
+    password = os.environ.get("CEDA_PASSWORD")
+    if username and password:
+        session.auth = (username, password)
+        logger.info("NIMROD: using env-var credentials for user: %s", username)
+        return session
+
+    logger.warning(
+        "No CEDA credentials found.  Set CEDA_TOKEN, ~/.netrc (dap.ceda.ac.uk), "
+        "or CEDA_USERNAME/CEDA_PASSWORD.  Downloads may fail."
+    )
+    return session
+
+
+def _nimrod_build_url(year: int, date_obj: date) -> str:
+    """Return the CEDA URL for the daily NIMROD tar file for *date_obj*."""
+    date_str = date_obj.strftime("%Y%m%d")
+    filename = NIMROD_FILE_PATTERN.format(date=date_str)
+    return f"{CEDA_NIMROD_BASE_URL}/{year}/{filename}"
+
+
+def _nimrod_download_tar(
+    url: str,
+    output_path: Path,
+    session: requests.Session,
+    timeout: int = 300,
+    chunk_size: int = 8192,
+) -> bool:
+    """Download one NIMROD tar file from CEDA.
+
+    Returns ``True`` on success, ``False`` on any failure.
+    """
+    try:
+        response = session.get(url, stream=True, timeout=timeout, allow_redirects=True)
+
+        if "auth.ceda.ac.uk" in response.url or "signin" in response.url.lower():
+            logger.error("Authentication redirect for %s — check CEDA credentials.", url)
+            return False
+
+        response.raise_for_status()
+
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" in content_type:
+            logger.error(
+                "Received HTML from %s — likely an auth or access error (Content-Type: %s).",
+                url,
+                content_type,
+            )
+            return False
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        downloaded = 0
+        with open(output_path, "wb") as fh:
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if chunk:
+                    fh.write(chunk)
+                    downloaded += len(chunk)
+
+        if downloaded == 0:
+            logger.error("Empty download from %s", url)
+            output_path.unlink(missing_ok=True)
+            return False
+
+        # Sanity-check: reject HTML masquerading as a tar file.
+        with open(output_path, "rb") as fh:
+            header = fh.read(512)
+        if len(header) < 512 or header[:15].lower() == b"<!doctype html":
+            logger.error("Downloaded file looks like HTML, not a tar: %s", url)
+            output_path.unlink(missing_ok=True)
+            return False
+
+        logger.debug("Downloaded %s (%d bytes)", output_path.name, downloaded)
+        return True
+
+    except requests.exceptions.RequestException as exc:
+        logger.error("Download failed for %s: %s", url, exc)
+        output_path.unlink(missing_ok=True)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - public processing utilities
+# ---------------------------------------------------------------------------
+
+
+def load_nimrod_shapefile(shapefile_path: Path) -> gpd.GeoDataFrame:
+    """Load a shapefile and reproject to British National Grid (EPSG:27700).
+
+    Parameters
+    ----------
+    shapefile_path :
+        Path to a shapefile or a directory containing a single ``.shp`` file.
+        Any input CRS is accepted — the data will be reprojected to BNG.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame in EPSG:27700 (British National Grid).
+    """
+    if shapefile_path.is_dir():
+        shp_files = list(shapefile_path.glob("*.shp"))
+        if not shp_files:
+            raise ValueError(f"No .shp file found in {shapefile_path}")
+        shapefile_path = shp_files[0]
+
+    gdf = gpd.read_file(shapefile_path)
+
+    if gdf.crs is None:
+        logger.warning("Shapefile has no CRS defined, assuming BNG (EPSG:27700)")
+        gdf = gdf.set_crs(epsg=NIMROD_BNG_EPSG)
+    elif gdf.crs.to_epsg() != NIMROD_BNG_EPSG:
+        logger.info("Reprojecting shapefile from %s to BNG", gdf.crs)
+        gdf = gdf.to_crs(epsg=NIMROD_BNG_EPSG)
+
+    return gdf
+
+
+def extract_nimrod_tar(tar_path: Path, extract_dir: Path) -> list[Path]:
+    """Extract a NIMROD ``.tar`` file and return paths to the ``.dat.gz`` members.
+
+    CEDA archives are uncompressed tar files despite the ``.tar`` extension.
+    Several open modes are tried in sequence so that compressed variants are
+    also handled transparently.
+
+    Parameters
+    ----------
+    tar_path :
+        Path to the tar file.
+    extract_dir :
+        Directory to extract into (created if absent).
+
+    Returns
+    -------
+    list[Path]
+        Sorted list of extracted ``.dat.gz`` paths.
+    """
+    extracted: list[Path] = []
+    try:
+        opened = False
+        for mode in ("r:", "r", "r:gz", "r:bz2", "r:xz"):
+            try:
+                with tarfile.open(tar_path, mode) as tf:  # type: ignore[arg-type]
+                    opened = True
+                    members = tf.getmembers()
+                    logger.debug(
+                        "Tar %s: %d member(s), mode=%s",
+                        tar_path.name,
+                        len(members),
+                        mode,
+                    )
+                    extract_dir.mkdir(parents=True, exist_ok=True)
+                    tf.extractall(path=extract_dir)
+                    for m in members:
+                        if m.name.endswith(".dat.gz"):
+                            extracted.append(extract_dir / m.name)
+                    if not extracted:
+                        names = [m.name for m in members[:20]]
+                        logger.warning(
+                            "No .dat.gz files in %s.  Members: %s",
+                            tar_path.name,
+                            names,
+                        )
+                    break
+            except (tarfile.ReadError, tarfile.CompressionError) as exc:
+                logger.debug("mode %s failed for %s: %s", mode, tar_path.name, exc)
+        if not opened:
+            logger.error("Could not open %s with any tar mode.", tar_path)
+    except (tarfile.TarError, OSError) as exc:
+        logger.error("Failed to extract %s: %s", tar_path, exc)
+    return sorted(extracted)
+
+
+def read_nimrod_file(dat_gz_path: Path) -> iris.cube.Cube | None:
+    """Decompress and load a NIMROD ``.dat.gz`` file as an Iris cube.
+
+    Parameters
+    ----------
+    dat_gz_path :
+        Path to the compressed NIMROD binary file.
+
+    Returns
+    -------
+    iris.cube.Cube or None
+        Loaded cube, or ``None`` if reading fails.
+    """
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as fh:
+            tmp = Path(fh.name)
+        with gzip.open(dat_gz_path, "rb") as gz, open(tmp, "wb") as out:
+            shutil.copyfileobj(gz, out)
+        return iris.load_cube(str(tmp))
+    except Exception as exc:
+        logger.error("Failed to read %s: %s", dat_gz_path, exc)
+        return None
+    finally:
+        if tmp is not None and tmp.exists():
+            tmp.unlink()
+
+
+def crop_nimrod_cube(
+    cube: iris.cube.Cube,
+    gdf: gpd.GeoDataFrame,
+) -> iris.cube.Cube | None:
+    """Crop an Iris cube to a shapefile extent and mask cells outside the polygons.
+
+    The cube must use 1-D BNG projection coordinates (the native grid of
+    NIMROD 1km composites).
+
+    Parameters
+    ----------
+    cube :
+        Iris cube with BNG projection coordinates.
+    gdf :
+        GeoDataFrame in BNG (EPSG:27700) whose union defines the mask.
+
+    Returns
+    -------
+    iris.cube.Cube or None
+        Spatially cropped and polygon-masked cube, or ``None`` on failure.
+    """
+    try:
+        x_coord = cube.coord(axis="X")
+        y_coord = cube.coord(axis="Y")
+
+        if x_coord.ndim != 1 or y_coord.ndim != 1:
+            logger.warning("crop_nimrod_cube: only 1-D coordinate grids are supported.")
+            return None
+
+        x_vals = x_coord.points
+        y_vals = y_coord.points
+        minx, miny, maxx, maxy = gdf.total_bounds
+
+        x_idx = np.where((x_vals >= minx) & (x_vals <= maxx))[0]
+        y_idx = np.where((y_vals >= miny) & (y_vals <= maxy))[0]
+
+        if x_idx.size == 0 or y_idx.size == 0:
+            logger.warning("Shapefile bounds do not intersect with cube extent.")
+            return None
+
+        x_slice = slice(x_idx[0], x_idx[-1] + 1)
+        y_slice = slice(y_idx[0], y_idx[-1] + 1)
+
+        x_dim = cube.coord_dims(x_coord)[0]
+        y_dim = cube.coord_dims(y_coord)[0]
+
+        if x_dim < y_dim:
+            cropped = cube[:, x_slice, y_slice] if cube.ndim == 3 else cube[x_slice, y_slice]
+        else:
+            cropped = cube[:, y_slice, x_slice] if cube.ndim == 3 else cube[y_slice, x_slice]
+
+        x_crop = cropped.coord(axis="X").points
+        y_crop = cropped.coord(axis="Y").points
+        x_res = float(np.median(np.diff(x_crop)))
+        y_res = float(np.median(np.diff(y_crop)))
+
+        transform = rasterio.transform.from_bounds(
+            x_crop.min() - abs(x_res) / 2,
+            y_crop.min() - abs(y_res) / 2,
+            x_crop.max() + abs(x_res) / 2,
+            y_crop.max() + abs(y_res) / 2,
+            len(x_crop),
+            len(y_crop),
+        )
+
+        mask = rasterio.features.geometry_mask(
+            list(gdf.geometry),
+            out_shape=(len(y_crop), len(x_crop)),
+            transform=transform,
+            invert=False,
+        )
+
+        # rasterio.transform.from_bounds is north-up (row 0 = north).
+        # If the cube's y-axis is south-up (ascending values), flip the mask.
+        if len(y_crop) > 1 and float(y_crop[0]) < float(y_crop[-1]):
+            mask = mask[::-1, :]
+
+        data = cropped.data
+        if np.ma.is_masked(data):
+            combined_mask = np.ma.getmaskarray(data) | mask
+            data = np.ma.masked_array(np.ma.getdata(data), mask=combined_mask)
+        else:
+            data = np.ma.masked_array(data, mask=mask)
+        cropped.data = data
+
+        return cropped
+
+    except Exception as exc:
+        logger.error("crop_nimrod_cube failed: %s", exc)
+        return None
+
+
+def save_nimrod_cube(cube: iris.cube.Cube, output_path: Path) -> bool:
+    """Save an Iris cube to a NetCDF file.
+
+    Parameters
+    ----------
+    cube :
+        Iris cube to save.
+    output_path :
+        Destination ``.nc`` path.  Parent directories are created as needed.
+
+    Returns
+    -------
+    bool
+        ``True`` if the file was written successfully.
+    """
+    try:
+        iris.FUTURE.save_split_attrs = True
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        iris.save(cube, str(output_path))
+        return True
+    except Exception as exc:
+        logger.error("Failed to save %s: %s", output_path, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - consolidation (public)
+# ---------------------------------------------------------------------------
+
+
+def find_nimrod_nc_files(
+    input_dir: Path,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[list[Path], int]:
+    """Return sorted ``.nc`` paths under *input_dir*, optionally date-filtered.
+
+    Files are expected to have stems of the form ``YYYYMMDD_HHMMSS``.  Any
+    file whose stem cannot be parsed is always included.
+
+    Parameters
+    ----------
+    input_dir :
+        Root directory to search recursively.
+    start :
+        Optional inclusive lower bound.
+    end :
+        Optional inclusive upper bound.
+
+    Returns
+    -------
+    tuple[list[Path], int]
+        ``(matched_files, n_skipped)``
+    """
+    all_files = sorted(input_dir.rglob("*.nc"))
+    if start is None and end is None:
+        return all_files, 0
+
+    matched: list[Path] = []
+    skipped = 0
+    for f in all_files:
+        try:
+            dt = datetime.strptime(f.stem, "%Y%m%d_%H%M%S")
+        except ValueError:
+            matched.append(f)
+            continue
+        if start is not None and dt < start:
+            skipped += 1
+            continue
+        if end is not None and dt > end:
+            skipped += 1
+            continue
+        matched.append(f)
+
+    return matched, skipped
+
+
+def consolidate_nimrod(
+    input_dir: Path,
+    output_path: Path,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    compression: int = 4,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Merge per-timestep NIMROD NetCDF files into a single NetCDF4 file.
+
+    Each input file is a single-timestep ``.nc`` produced by
+    :func:`process_nimrod_local` or :func:`download_and_crop_nimrod`.  Files
+    are opened in parallel via Dask and merged along the time dimension,
+    producing a dataset with shape
+    ``(time, projection_y_coordinate, projection_x_coordinate)``.
+
+    The key performance improvement over a naive ``open_mfdataset`` call is
+    ``parallel=True``, which uses ``dask.delayed`` to open all files
+    concurrently, and a ``preprocess`` step that promotes the scalar ``time``
+    coordinate written by Iris into a proper 1-element dimension before
+    concatenation.
+
+    Parameters
+    ----------
+    input_dir :
+        Root directory containing per-timestep ``.nc`` files (searched
+        recursively).
+    output_path :
+        Destination ``.nc`` file to write.
+    start :
+        Optional inclusive start datetime for date-range filtering.
+    end :
+        Optional inclusive end datetime for date-range filtering.
+    compression :
+        zlib compression level 0-9 applied to all data variables (0 = none).
+    dry_run :
+        If ``True``, print which files would be merged without writing.
+
+    Returns
+    -------
+    dict
+        ``{"merged": int, "skipped": int}``
+    """
+    from tqdm.dask import TqdmCallback
+
+    logger.info("Searching for NetCDF files in: %s", input_dir)
+    nc_files, n_skipped = find_nimrod_nc_files(input_dir, start, end)
+
+    if not nc_files:
+        logger.error("No NetCDF files found in: %s", input_dir)
+        return {"merged": 0, "skipped": n_skipped}
+
+    logger.info("Found %d file(s) to merge (%d filtered out)", len(nc_files), n_skipped)
+
+    if dry_run:
+        logger.info("[dry-run] Would merge %d files -> %s", len(nc_files), output_path)
+        for f in nc_files:
+            try:
+                rel = f.relative_to(input_dir)
+            except ValueError:
+                rel = f
+            print(f"  {rel}")
+        return {"merged": len(nc_files), "skipped": n_skipped}
+
+    def _fix_time(ds: xr.Dataset) -> xr.Dataset:
+        """Promote a scalar time coordinate to a 1-element dimension.
+
+        Iris saves single-timestep cubes with time as a 0-d (scalar)
+        coordinate.  xarray needs it to be a 1-element dimension so that
+        ``concat_dim="time"`` can stack multiple files into one axis.
+        """
+        if "time" in ds.coords and ds["time"].ndim == 0:
+            return ds.expand_dims("time")
+        return ds
+
+    logger.info("Opening %d file(s) with xarray (parallel=True) ...", len(nc_files))
+    try:
+        ds = xr.open_mfdataset(
+            [str(f) for f in nc_files],
+            # parallel=True uses dask.delayed to open every file
+            # concurrently — a significant speedup for thousands of files.
+            parallel=True,
+            # preprocess promotes the scalar time coordinate written by Iris
+            # into a 1-element dimension before concatenation.
+            preprocess=_fix_time,
+            combine="nested",
+            concat_dim="time",
+            # 288 five-minute steps = one day; a natural chunk boundary.
+            chunks={"time": 288},
+            compat="override",
+            coords="minimal",
+        )
+    except Exception as exc:
+        logger.error("Failed to open/merge files: %s", exc, exc_info=True)
+        raise
+
+    time_start = str(ds.time.values[0])[:19]
+    time_end = str(ds.time.values[-1])[:19]
+    logger.info("  Dimensions : %s", dict(ds.sizes))
+    logger.info("  Variables  : %s", list(ds.data_vars))
+    logger.info("  Time range : %s -> %s", time_start, time_end)
+    logger.info("  Timesteps  : %d", ds.sizes.get("time", "?"))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    encoding = {var: {"zlib": compression > 0, "complevel": compression} for var in ds.data_vars}
+
+    logger.info("Writing merged dataset to: %s", output_path)
+    with TqdmCallback(desc="Writing", unit="chunk"):
+        ds.to_netcdf(output_path, format="NETCDF4", encoding=encoding)
+
+    size_mb = output_path.stat().st_size / (1024**2)
+    logger.info("Done.  Output: %s (%.1f MB)", output_path, size_mb)
+
+    return {"merged": len(nc_files), "skipped": n_skipped}
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - local tar processing (public)
+# ---------------------------------------------------------------------------
+
+
+def process_nimrod_tar(
+    tar_path: Path,
+    gdf: gpd.GeoDataFrame,
+    output_dir: Path,
+    temp_dir: Path,
+) -> dict[str, int]:
+    """Extract and process one locally downloaded NIMROD tar file.
+
+    Reads each ``.dat.gz`` timestep inside the tar with Iris, crops it to
+    *gdf*, and writes per-timestep NetCDF files under
+    ``output_dir/<year>/<YYYYMMDD>/``.
+
+    Parameters
+    ----------
+    tar_path :
+        Path to the ``.tar`` file.  The filename must follow the CEDA
+        convention ``metoffice-c-band-rain-radar_uk_YYYYMMDD_...``.
+    gdf :
+        GeoDataFrame in BNG (EPSG:27700) used for spatial cropping.
+    output_dir :
+        Root output directory.
+    temp_dir :
+        Scratch directory for extraction; cleaned up on return.
+
+    Returns
+    -------
+    dict
+        ``{"processed": int, "errors": int}``
+    """
+    logger.info("Processing %s", tar_path.name)
+
+    # Parse YYYYMMDD from e.g. metoffice-c-band-rain-radar_uk_20230101_...
+    try:
+        parts = tar_path.stem.split("_")  # stem strips .tar
+        date_str = parts[2]  # YYYYMMDD
+        year = date_str[:4]
+    except (IndexError, ValueError) as exc:
+        logger.error("Cannot parse date from %s: %s", tar_path.name, exc)
+        return {"processed": 0, "errors": 1}
+
+    date_output_dir = output_dir / year / date_str
+    if date_output_dir.exists() and any(date_output_dir.glob("*.nc")):
+        logger.info("  [skip] Already processed")
+        return {"processed": 0, "errors": 0}
+
+    extract_dir = temp_dir / date_str
+    dat_gz_files = extract_nimrod_tar(tar_path, extract_dir)
+
+    if not dat_gz_files:
+        logger.error("  [error] No .dat.gz files found in %s", tar_path.name)
+        return {"processed": 0, "errors": 1}
+
+    processed = error_count = 0
+
+    for dat_gz_path in dat_gz_files:
+        cube = read_nimrod_file(dat_gz_path)
+        if cube is None:
+            error_count += 1
+            continue
+
+        cropped = crop_nimrod_cube(cube, gdf)
+        if cropped is None:
+            error_count += 1
+            continue
+
+        try:
+            time_coord = cropped.coord("time")
+            ts = time_coord.units.num2date(time_coord.points[0])
+            timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            timestamp_str = dat_gz_path.stem.replace(".dat", "")
+
+        if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
+            processed += 1
+        else:
+            error_count += 1
+
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+
+    if error_count == 0:
+        logger.info("  [done] Processed %d timestep(s)", processed)
+    else:
+        logger.warning("  [done] %d timestep(s) processed, %d error(s)", processed, error_count)
+
+    return {"processed": processed, "errors": error_count}
+
+
+def process_nimrod_local(
+    input_paths: list[Path],
+    shapefile_path: Path,
+    output_dir: Path,
+) -> dict[str, int]:
+    """Process locally downloaded NIMROD tar files and crop to a shapefile.
+
+    Discovers ``.tar`` files in *input_paths* (files or directories),
+    extracts each one, reads every ``.dat.gz`` timestep with Iris, crops
+    it to *shapefile_path*, and writes per-timestep NetCDF files under
+    ``output_dir/<year>/<YYYYMMDD>/``.
+
+    Parameters
+    ----------
+    input_paths :
+        List of ``.tar`` file paths or directories containing ``.tar`` files.
+    shapefile_path :
+        Path to the shapefile used for spatial cropping (any input CRS).
+    output_dir :
+        Root directory for processed NetCDF files.
+
+    Returns
+    -------
+    dict
+        ``{"processed": int, "errors": int}``
+    """
+    logger.info("NIMROD local file processor")
+    logger.info("  Shapefile  : %s", shapefile_path)
+    logger.info("  Output dir : %s", output_dir)
+
+    gdf = load_nimrod_shapefile(shapefile_path)
+    logger.info("  Bounds (BNG): %s", gdf.total_bounds)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = output_dir / ".temp"
+    temp_dir.mkdir(exist_ok=True)
+
+    tar_files: list[Path] = []
+    for p in input_paths:
+        if p.is_file() and p.suffix == ".tar":
+            tar_files.append(p)
+        elif p.is_dir():
+            tar_files.extend(p.glob("*.tar"))
+
+    if not tar_files:
+        logger.error("No tar files found in: %s", input_paths)
+        return {"processed": 0, "errors": 0}
+
+    logger.info("Found %d tar file(s) to process", len(tar_files))
+    results: dict[str, int] = {"processed": 0, "errors": 0}
+
+    for tar_path in sorted(tar_files):
+        r = process_nimrod_tar(tar_path, gdf, output_dir, temp_dir)
+        results["processed"] += r["processed"]
+        results["errors"] += r["errors"]
+
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+
+    logger.info("Done.  Processed: %d  Errors: %d", results["processed"], results["errors"])
+    return results
+
+
+# ---------------------------------------------------------------------------
+# NIMROD 1km composite - CEDA download + process pipeline (public)
+# ---------------------------------------------------------------------------
+
+
+def _nimrod_process_date(
+    date_obj: date,
+    gdf: gpd.GeoDataFrame,
+    output_dir: Path,
+    temp_dir: Path,
+    dry_run: bool,
+    print_lock: threading.Lock,
+    session: requests.Session,
+) -> dict[str, int]:
+    """Download and process one day of NIMROD data (worker function)."""
+    date_str = date_obj.strftime("%Y%m%d")
+    year = date_obj.year
+    url = _nimrod_build_url(year, date_obj)
+
+    with print_lock:
+        logger.info("Processing %s", date_str)
+
+    if dry_run:
+        with print_lock:
+            logger.info("  [dry-run] %s", url)
+        return {"processed": 0, "skipped": 0, "errors": 0, "dry_run": 1}
+
+    date_output_dir = output_dir / str(year) / date_str
+    if date_output_dir.exists() and any(date_output_dir.glob("*.nc")):
+        with print_lock:
+            logger.info("  [skip] Already processed")
+        return {"processed": 0, "skipped": 1, "errors": 0, "dry_run": 0}
+
+    tar_path = temp_dir / f"{date_str}.tar"
+    if not _nimrod_download_tar(url, tar_path, session):
+        with print_lock:
+            logger.error("  [error] Download failed: %s", url)
+        return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
+
+    extract_dir = temp_dir / date_str
+    dat_gz_files = extract_nimrod_tar(tar_path, extract_dir)
+
+    if not dat_gz_files:
+        with print_lock:
+            logger.error("  [error] No .dat.gz files in tar for %s", date_str)
+        tar_path.unlink(missing_ok=True)
+        return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
+
+    processed = error_count = 0
+
+    for dat_gz_path in dat_gz_files:
+        cube = read_nimrod_file(dat_gz_path)
+        if cube is None:
+            error_count += 1
+            continue
+
+        cropped = crop_nimrod_cube(cube, gdf)
+        if cropped is None:
+            error_count += 1
+            continue
+
+        try:
+            time_coord = cropped.coord("time")
+            ts = time_coord.units.num2date(time_coord.points[0])
+            timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            timestamp_str = dat_gz_path.stem.replace(".dat", "")
+
+        if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
+            processed += 1
+        else:
+            error_count += 1
+
+    tar_path.unlink(missing_ok=True)
+    if extract_dir.exists():
+        shutil.rmtree(extract_dir)
+
+    with print_lock:
+        if error_count == 0:
+            logger.info("  [done] %d timestep(s)", processed)
+        else:
+            logger.warning("  [done] %d timestep(s), %d error(s)", processed, error_count)
+
+    return {"processed": processed, "skipped": 0, "errors": error_count, "dry_run": 0}
+
+
+def download_and_crop_nimrod(
+    years: list[int],
+    shapefile_path: Path,
+    output_dir: Path,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    workers: int = 4,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Download NIMROD 1km composite data from CEDA and crop to a shapefile.
+
+    Fetches the daily tar files from the CEDA NIMROD archive for each
+    requested year, extracts every ``.dat.gz`` timestep with Iris, crops it
+    to *shapefile_path*, and writes per-timestep NetCDF files under
+    ``output_dir/<year>/<YYYYMMDD>/``.
+
+    Parameters
+    ----------
+    years :
+        Calendar years to download (e.g. ``[2023, 2024]``).
+    shapefile_path :
+        Path to the shapefile used for spatial cropping (any input CRS).
+    output_dir :
+        Root directory for the processed NetCDF files.
+    start_date :
+        Optional inclusive start date filter.
+    end_date :
+        Optional inclusive end date filter.
+    workers :
+        Number of parallel download/processing threads.
+    dry_run :
+        If ``True``, log what would be downloaded without doing anything.
+
+    Returns
+    -------
+    dict
+        ``{"processed": int, "skipped": int, "errors": int, "dry_run": int}``
+    """
+    logger.info("NIMROD 1km composite downloader and cropper")
+    logger.info("  Years      : %s", years)
+    logger.info("  Shapefile  : %s", shapefile_path)
+    logger.info("  Output dir : %s", output_dir)
+    logger.info("  Workers    : %d", workers)
+    logger.info("  Dry run    : %s", dry_run)
+
+    gdf = load_nimrod_shapefile(shapefile_path)
+    logger.info("  Bounds (BNG): %s", gdf.total_bounds)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = output_dir / ".temp"
+    temp_dir.mkdir(exist_ok=True)
+
+    dates_to_process: list[date] = []
+    for year in years:
+        y_start = start_date if (start_date and start_date.year == year) else date(year, 1, 1)
+        y_end = end_date if (end_date and end_date.year == year) else date(year, 12, 31)
+        dates_to_process.extend(_nimrod_generate_dates(y_start, y_end))
+
+    logger.info(
+        "Processing %d date(s) across %d year(s)",
+        len(dates_to_process),
+        len(years),
+    )
+
+    session = _nimrod_create_session()
+    print_lock = threading.Lock()
+    results: dict[str, int] = {"processed": 0, "skipped": 0, "errors": 0, "dry_run": 0}
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _nimrod_process_date,
+                d,
+                gdf,
+                output_dir,
+                temp_dir,
+                dry_run,
+                print_lock,
+                session,
+            ): d
+            for d in dates_to_process
+        }
+        for future in as_completed(futures):
+            r = future.result()
+            for k, v in r.items():
+                results[k] = results.get(k, 0) + v
+
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+
+    logger.info("Done.")
+    logger.info("  Processed : %d", results["processed"])
+    logger.info("  Skipped   : %d", results["skipped"])
+    logger.info("  Errors    : %d", results["errors"])
+    if dry_run:
+        logger.info("  Dry-run   : %d", results["dry_run"])
+
+    return results
 
 
 # ---------------------------------------------------------------------------
