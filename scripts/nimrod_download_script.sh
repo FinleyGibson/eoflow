@@ -1,15 +1,25 @@
-#! /usr/bin/sh
+#!/usr/bin/sh
+
+# Load CEDA_TOKEN from .env in the repo root (one level above this script).
+ENV_FILE="$(dirname "$0")/../.env"
+if [ -f "$ENV_FILE" ]; then
+    # Export only lines of the form KEY=VALUE, ignoring comments and blanks.
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+fi
 
 usage() {
-    echo "Usage: $0 <date> <target_directory>"
+    echo "Usage: $0 <year> <target_directory>"
     echo ""
-    echo "  <date>              Date path to download, e.g. 2023 or 2023/01"
+    echo "  <year>              Four-digit year to download, e.g. 2023"
     echo "  <target_directory>  Directory to save downloaded files into"
     echo ""
-    echo "  Requires the CEDA_TOKEN environment variable to be set."
+    echo "  Requires CEDA_TOKEN to be set - either in .env (repo root) or exported in your shell."
     echo ""
     echo "Example:"
-    echo "  CEDA_TOKEN=mytoken $0 2023/01 /data/nimrod"
+    echo "  $0 2023 /data/nimrod"
     exit 1
 }
 
@@ -22,11 +32,11 @@ if [ -z "$CEDA_TOKEN" ]; then
     exit 1
 fi
 
-DATE="$1"
+YEAR="$1"
 TARGET_DIR="$2"
-URL="https://dap.ceda.ac.uk/badc/ukmo-nimrod/data/composite/uk-1km/$DATE/"
+URL="https://dap.ceda.ac.uk/badc/ukmo-nimrod/data/composite/uk-1km/$YEAR/"
 
-echo "Downloading Nimrod data for: $DATE"
+echo "Downloading Nimrod data for: $YEAR"
 echo "Saving to:                   $TARGET_DIR"
 echo ""
 

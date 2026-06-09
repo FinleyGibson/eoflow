@@ -36,6 +36,7 @@ dependencies = [
     "iris>=1.0.7",
     "contextily>=1.7.0",
     "tqdm>=4.57.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
