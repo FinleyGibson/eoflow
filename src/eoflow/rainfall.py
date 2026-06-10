@@ -42,6 +42,7 @@ This matches the naming convention used by ``trigger-aws.py`` so the
 from __future__ import annotations
 
 import gzip
+import os
 import shutil
 import tarfile
 import tempfile
@@ -101,6 +102,40 @@ UK_BNG_EXTENT = (0.0, 0.0, 700_000.0, 1_300_000.0)
 # Short runs  : 00,06,09,12,18,21
 # Medium runs : 03,15
 ALL_RUN_HOURS: list[int] = sorted(range(24))
+
+# Silence iris deprecation/future warnings for the whole process.
+iris.FUTURE.save_split_attrs = True
+iris.FUTURE.date_microseconds = True
+
+# HDF5 (the backend for NetCDF4) is not thread-safe by default.
+# Serialise all iris.save() calls with this lock so concurrent worker
+# threads don't corrupt each other's HDF5 context.
+_IRIS_WRITE_LOCK = threading.Lock()
+
+
+class _NimrodCropCache:
+    """Pre-computed spatial crop parameters reused across all timesteps in a batch.
+
+    Avoids re-deriving bounding-box slices and rebuilding the rasterio
+    geometry mask for every ``.dat.gz`` file when the NIMROD grid is
+    identical across all timesteps (which it always is for a given day).
+    """
+
+    __slots__ = ("x_slice", "y_slice", "ndim", "x_dim_first", "mask")
+
+    def __init__(
+        self,
+        x_slice: slice,
+        y_slice: slice,
+        ndim: int,
+        x_dim_first: bool,
+        mask: np.ndarray,
+    ) -> None:
+        self.x_slice = x_slice
+        self.y_slice = y_slice
+        self.ndim = ndim
+        self.x_dim_first = x_dim_first
+        self.mask = mask  # orientation-corrected; ready to apply directly
 
 
 # ---------------------------------------------------------------------------
@@ -1255,7 +1290,6 @@ def _nimrod_create_session() -> requests.Session:
     2. ``~/.netrc`` entry for ``dap.ceda.ac.uk``.
     3. ``CEDA_USERNAME`` / ``CEDA_PASSWORD`` environment variables.
     """
-    import os
     from netrc import NetrcParseError, netrc
 
     session = requests.Session()
@@ -1476,6 +1510,39 @@ def read_nimrod_file(dat_gz_path: Path) -> iris.cube.Cube | None:
             tmp.unlink()
 
 
+def _read_nimrod_gz_stream(
+    gz_fileobj,
+    name: str = "<stream>",
+) -> iris.cube.Cube | None:
+    """Load a NIMROD ``.dat.gz`` directly from a file-like object.
+
+    Decompresses the gzip stream into a temporary ``.dat`` file (never
+    touching the intermediate ``.dat.gz`` on disk) and loads it with Iris.
+    The temporary file is removed before returning.
+
+    Parameters
+    ----------
+    gz_fileobj :
+        Readable file-like object containing gzip-compressed NIMROD data
+        (e.g. from ``tarfile.TarFile.extractfile``).
+    name :
+        Descriptive label used only in error log messages.
+    """
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as fh:
+            tmp = Path(fh.name)
+        with gzip.open(gz_fileobj, "rb") as gz, open(tmp, "wb") as out:
+            shutil.copyfileobj(gz, out)  # type: ignore[misc]  # gz is GzipFile in "rb" mode
+        return iris.load_cube(str(tmp))
+    except Exception as exc:
+        logger.error("Failed to read %s: %s", name, exc)
+        return None
+    finally:
+        if tmp is not None and tmp.exists():
+            tmp.unlink()
+
+
 def crop_nimrod_cube(
     cube: iris.cube.Cube,
     gdf: gpd.GeoDataFrame,
@@ -1568,6 +1635,125 @@ def crop_nimrod_cube(
         return None
 
 
+def _crop_nimrod_cached(
+    cube: iris.cube.Cube,
+    gdf: gpd.GeoDataFrame,
+    cache: _NimrodCropCache | None,
+) -> tuple[iris.cube.Cube | None, _NimrodCropCache | None]:
+    """Crop a NIMROD cube, building and caching spatial parameters on first call.
+
+    All NIMROD timesteps share the same grid, so bounding-box slices and the
+    rasterio geometry mask only need to be computed once per batch.  Pass
+    ``cache=None`` on the first call; pass the returned cache object to
+    every subsequent call in the same batch to skip recomputation.
+
+    Parameters
+    ----------
+    cube :
+        Iris cube with 1-D BNG projection coordinates.
+    gdf :
+        GeoDataFrame in BNG (EPSG:27700) defining the crop region.
+    cache :
+        ``None`` on the first call; the ``_NimrodCropCache`` returned by the
+        previous call on all subsequent calls.
+
+    Returns
+    -------
+    tuple
+        ``(cropped_cube | None, cache | None)``
+    """
+    try:
+        x_coord = cube.coord(axis="X")
+        y_coord = cube.coord(axis="Y")
+
+        if x_coord.ndim != 1 or y_coord.ndim != 1:
+            logger.warning("_crop_nimrod_cached: only 1-D coordinate grids are supported.")
+            return None, cache
+
+        if cache is None:
+            # First call: derive slices, compute and cache the geometry mask.
+            x_vals = x_coord.points
+            y_vals = y_coord.points
+            minx, miny, maxx, maxy = gdf.total_bounds
+
+            x_idx = np.where((x_vals >= minx) & (x_vals <= maxx))[0]
+            y_idx = np.where((y_vals >= miny) & (y_vals <= maxy))[0]
+
+            if x_idx.size == 0 or y_idx.size == 0:
+                logger.warning("Shapefile bounds do not intersect with cube extent.")
+                return None, None
+
+            x_slice = slice(x_idx[0], x_idx[-1] + 1)
+            y_slice = slice(y_idx[0], y_idx[-1] + 1)
+
+            x_dim = cube.coord_dims(x_coord)[0]
+            y_dim = cube.coord_dims(y_coord)[0]
+            x_dim_first = x_dim < y_dim
+
+            if x_dim_first:
+                cropped = cube[:, x_slice, y_slice] if cube.ndim == 3 else cube[x_slice, y_slice]
+            else:
+                cropped = cube[:, y_slice, x_slice] if cube.ndim == 3 else cube[y_slice, x_slice]
+
+            x_crop = cropped.coord(axis="X").points
+            y_crop = cropped.coord(axis="Y").points
+            x_res = float(np.median(np.diff(x_crop)))
+            y_res = float(np.median(np.diff(y_crop)))
+
+            transform = rasterio.transform.from_bounds(
+                x_crop.min() - abs(x_res) / 2,
+                y_crop.min() - abs(y_res) / 2,
+                x_crop.max() + abs(x_res) / 2,
+                y_crop.max() + abs(y_res) / 2,
+                len(x_crop),
+                len(y_crop),
+            )
+            mask = rasterio.features.geometry_mask(
+                list(gdf.geometry),
+                out_shape=(len(y_crop), len(x_crop)),
+                transform=transform,
+                invert=False,
+            )
+            if len(y_crop) > 1 and float(y_crop[0]) < float(y_crop[-1]):
+                mask = mask[::-1, :]
+
+            cache = _NimrodCropCache(
+                x_slice=x_slice,
+                y_slice=y_slice,
+                ndim=cube.ndim,
+                x_dim_first=x_dim_first,
+                mask=mask,
+            )
+        else:
+            # Subsequent calls: apply cached slices directly.
+            if cache.x_dim_first:
+                cropped = (
+                    cube[:, cache.x_slice, cache.y_slice]
+                    if cube.ndim == 3
+                    else cube[cache.x_slice, cache.y_slice]
+                )
+            else:
+                cropped = (
+                    cube[:, cache.y_slice, cache.x_slice]
+                    if cube.ndim == 3
+                    else cube[cache.y_slice, cache.x_slice]
+                )
+
+        data = cropped.data
+        if np.ma.is_masked(data):
+            combined_mask = np.ma.getmaskarray(data) | cache.mask
+            data = np.ma.masked_array(np.ma.getdata(data), mask=combined_mask)
+        else:
+            data = np.ma.masked_array(data, mask=cache.mask)
+        cropped.data = data
+
+        return cropped, cache
+
+    except Exception as exc:
+        logger.error("_crop_nimrod_cached failed: %s", exc)
+        return None, cache
+
+
 def save_nimrod_cube(cube: iris.cube.Cube, output_path: Path) -> bool:
     """Save an Iris cube to a NetCDF file.
 
@@ -1584,9 +1770,13 @@ def save_nimrod_cube(cube: iris.cube.Cube, output_path: Path) -> bool:
         ``True`` if the file was written successfully.
     """
     try:
-        iris.FUTURE.save_split_attrs = True
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        iris.save(cube, str(output_path))
+        with _IRIS_WRITE_LOCK:
+            # Re-assert inside the lock: iris FUTURE flags can misbehave
+            # when accessed from worker threads for the first time.
+            iris.FUTURE.save_split_attrs = True
+            iris.FUTURE.date_microseconds = True
+            iris.save(cube, str(output_path))
         return True
     except Exception as exc:
         logger.error("Failed to save %s: %s", output_path, exc)
@@ -1772,10 +1962,11 @@ def process_nimrod_tar(
     output_dir: Path,
     temp_dir: Path,
 ) -> dict[str, int]:
-    """Extract and process one locally downloaded NIMROD tar file.
+    """Stream and process one locally downloaded NIMROD tar file.
 
-    Reads each ``.dat.gz`` timestep inside the tar with Iris, crops it to
-    *gdf*, and writes per-timestep NetCDF files under
+    Opens the tar without full extraction, reads each ``.dat.gz`` member
+    directly into memory, crops to *gdf* (reusing cached spatial parameters
+    across timesteps), and writes per-timestep NetCDF files under
     ``output_dir/<year>/<YYYYMMDD>/``.
 
     Parameters
@@ -1788,7 +1979,7 @@ def process_nimrod_tar(
     output_dir :
         Root output directory.
     temp_dir :
-        Scratch directory for extraction; cleaned up on return.
+        Kept for API compatibility; no longer used for intermediate files.
 
     Returns
     -------
@@ -1811,40 +2002,54 @@ def process_nimrod_tar(
         logger.info("  [skip] Already processed")
         return {"processed": 0, "errors": 0}
 
-    extract_dir = temp_dir / date_str
-    dat_gz_files = extract_nimrod_tar(tar_path, extract_dir)
-
-    if not dat_gz_files:
-        logger.error("  [error] No .dat.gz files found in %s", tar_path.name)
-        return {"processed": 0, "errors": 1}
-
     processed = error_count = 0
+    crop_cache: _NimrodCropCache | None = None
+    opened = False
 
-    for dat_gz_path in dat_gz_files:
-        cube = read_nimrod_file(dat_gz_path)
-        if cube is None:
-            error_count += 1
-            continue
-
-        cropped = crop_nimrod_cube(cube, gdf)
-        if cropped is None:
-            error_count += 1
-            continue
-
+    for mode in ("r:", "r", "r:gz", "r:bz2", "r:xz"):
         try:
-            time_coord = cropped.coord("time")
-            ts = time_coord.units.num2date(time_coord.points[0])
-            timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
-        except Exception:
-            timestamp_str = dat_gz_path.stem.replace(".dat", "")
+            with tarfile.open(tar_path, mode) as tf:  # type: ignore[arg-type]
+                opened = True
+                members = [m for m in tf.getmembers() if m.name.endswith(".dat.gz")]
+                if not members:
+                    names = [m.name for m in tf.getmembers()[:20]]
+                    logger.warning("No .dat.gz files in %s.  Members: %s", tar_path.name, names)
+                    return {"processed": 0, "errors": 1}
 
-        if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
-            processed += 1
-        else:
-            error_count += 1
+                for member in members:
+                    gz_fileobj = tf.extractfile(member)
+                    if gz_fileobj is None:
+                        error_count += 1
+                        continue
 
-    if extract_dir.exists():
-        shutil.rmtree(extract_dir)
+                    cube = _read_nimrod_gz_stream(gz_fileobj, member.name)
+                    if cube is None:
+                        error_count += 1
+                        continue
+
+                    cropped, crop_cache = _crop_nimrod_cached(cube, gdf, crop_cache)
+                    if cropped is None:
+                        error_count += 1
+                        continue
+
+                    try:
+                        time_coord = cropped.coord("time")
+                        ts = time_coord.units.num2date(time_coord.points[0])
+                        timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
+                    except Exception:
+                        timestamp_str = Path(member.name).stem.replace(".dat", "")
+
+                    if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
+                        processed += 1
+                    else:
+                        error_count += 1
+            break
+        except (tarfile.ReadError, tarfile.CompressionError) as exc:
+            logger.debug("mode %s failed for %s: %s", mode, tar_path.name, exc)
+
+    if not opened:
+        logger.error("Could not open %s with any tar mode.", tar_path)
+        return {"processed": 0, "errors": 1}
 
     if error_count == 0:
         logger.info("  [done] Processed %d timestep(s)", processed)
@@ -1858,13 +2063,15 @@ def process_nimrod_local(
     input_paths: list[Path],
     shapefile_path: Path,
     output_dir: Path,
+    max_workers: int | None = None,
 ) -> dict[str, int]:
     """Process locally downloaded NIMROD tar files and crop to a shapefile.
 
-    Discovers ``.tar`` files in *input_paths* (files or directories),
-    extracts each one, reads every ``.dat.gz`` timestep with Iris, crops
-    it to *shapefile_path*, and writes per-timestep NetCDF files under
-    ``output_dir/<year>/<YYYYMMDD>/``.
+    Discovers ``.tar`` files in *input_paths* (files or directories), streams
+    each one without full extraction, reads every ``.dat.gz`` timestep with
+    Iris, crops it to *shapefile_path*, and writes per-timestep NetCDF files
+    under ``output_dir/<year>/<YYYYMMDD>/``.  Multiple tar files are processed
+    in parallel using a thread pool.
 
     Parameters
     ----------
@@ -1874,6 +2081,9 @@ def process_nimrod_local(
         Path to the shapefile used for spatial cropping (any input CRS).
     output_dir :
         Root directory for processed NetCDF files.
+    max_workers :
+        Maximum number of parallel worker threads.  Defaults to
+        ``min(len(tar_files), os.cpu_count())``.
 
     Returns
     -------
@@ -1902,13 +2112,28 @@ def process_nimrod_local(
         logger.error("No tar files found in: %s", input_paths)
         return {"processed": 0, "errors": 0}
 
-    logger.info("Found %d tar file(s) to process", len(tar_files))
+    tar_files = sorted(tar_files)
+    workers = min(len(tar_files), max_workers or os.cpu_count() or 4)
+    logger.info("Found %d tar file(s) to process (workers: %d)", len(tar_files), workers)
     results: dict[str, int] = {"processed": 0, "errors": 0}
 
-    for tar_path in sorted(tar_files):
-        r = process_nimrod_tar(tar_path, gdf, output_dir, temp_dir)
-        results["processed"] += r["processed"]
-        results["errors"] += r["errors"]
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(process_nimrod_tar, tar_path, gdf, output_dir, temp_dir): tar_path
+            for tar_path in tar_files
+        }
+        for future in as_completed(futures):
+            tar_path = futures[future]
+            try:
+                r = future.result()
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error processing %s: %s", tar_path.name, exc, exc_info=True
+                )
+                results["errors"] += 1
+                continue
+            results["processed"] += r["processed"]
+            results["errors"] += r["errors"]
 
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
@@ -1956,43 +2181,58 @@ def _nimrod_process_date(
             logger.error("  [error] Download failed: %s", url)
         return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
 
-    extract_dir = temp_dir / date_str
-    dat_gz_files = extract_nimrod_tar(tar_path, extract_dir)
-
-    if not dat_gz_files:
-        with print_lock:
-            logger.error("  [error] No .dat.gz files in tar for %s", date_str)
-        tar_path.unlink(missing_ok=True)
-        return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
-
     processed = error_count = 0
+    crop_cache: _NimrodCropCache | None = None
+    opened = False
 
-    for dat_gz_path in dat_gz_files:
-        cube = read_nimrod_file(dat_gz_path)
-        if cube is None:
-            error_count += 1
-            continue
-
-        cropped = crop_nimrod_cube(cube, gdf)
-        if cropped is None:
-            error_count += 1
-            continue
-
+    for mode in ("r:", "r", "r:gz", "r:bz2", "r:xz"):
         try:
-            time_coord = cropped.coord("time")
-            ts = time_coord.units.num2date(time_coord.points[0])
-            timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
-        except Exception:
-            timestamp_str = dat_gz_path.stem.replace(".dat", "")
+            with tarfile.open(tar_path, mode) as tf:  # type: ignore[arg-type]
+                opened = True
+                members = [m for m in tf.getmembers() if m.name.endswith(".dat.gz")]
+                if not members:
+                    with print_lock:
+                        logger.error("  [error] No .dat.gz files in tar for %s", date_str)
+                    tar_path.unlink(missing_ok=True)
+                    return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
 
-        if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
-            processed += 1
-        else:
-            error_count += 1
+                for member in members:
+                    gz_fileobj = tf.extractfile(member)
+                    if gz_fileobj is None:
+                        error_count += 1
+                        continue
+
+                    cube = _read_nimrod_gz_stream(gz_fileobj, member.name)
+                    if cube is None:
+                        error_count += 1
+                        continue
+
+                    cropped, crop_cache = _crop_nimrod_cached(cube, gdf, crop_cache)
+                    if cropped is None:
+                        error_count += 1
+                        continue
+
+                    try:
+                        time_coord = cropped.coord("time")
+                        ts = time_coord.units.num2date(time_coord.points[0])
+                        timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
+                    except Exception:
+                        timestamp_str = Path(member.name).stem.replace(".dat", "")
+
+                    if save_nimrod_cube(cropped, date_output_dir / f"{timestamp_str}.nc"):
+                        processed += 1
+                    else:
+                        error_count += 1
+            break
+        except (tarfile.ReadError, tarfile.CompressionError):
+            pass
 
     tar_path.unlink(missing_ok=True)
-    if extract_dir.exists():
-        shutil.rmtree(extract_dir)
+
+    if not opened:
+        with print_lock:
+            logger.error("  [error] Could not open tar for %s", date_str)
+        return {"processed": 0, "skipped": 0, "errors": 1, "dry_run": 0}
 
     with print_lock:
         if error_count == 0:
