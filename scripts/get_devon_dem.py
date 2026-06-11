@@ -76,7 +76,7 @@ from scripts.get_dem import (
     download_dem,
 )
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 # Default shapefile path (same as get_devon_water_quality.py)
 _DEFAULT_SHAPEFILE = Path(__file__).resolve().parent.parent / "data" / "devon_county"

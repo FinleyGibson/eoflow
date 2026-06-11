@@ -54,7 +54,7 @@ import pandas as pd
 from eoflow.ea import EAWaterQualityAPI
 from eoflow.log_utils import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 # ---------------------------------------------------------------------------
 # State / checkpoint helpers

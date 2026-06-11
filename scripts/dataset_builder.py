@@ -13,9 +13,9 @@ Features
 Usage
 -----
     python -m scripts.dataset_builder \
-        --csv  notebooks/citizen_science_data/cs_df_devon \
-        --dem  /home/finley/Work/RDS/projects/enforce/data/rasters/elevation_raw.tif \
-        --out  outputs/devon_catchments.gpkg
+       --csv  data/wq_samples/devon_water_quality_10.csv \
+       --dem  data/dems/devon_dem_cop30.tif \
+       --out  out/devon_catchments_10.gpkg
 
     # Optional flags
         --checkpoint-every  10        # save after every N new delineations
@@ -42,18 +42,12 @@ from shapely.geometry import Point, Polygon
 
 from eoflow.catchment import _delineate_catchment_core
 from eoflow.log_utils import (
-    DETAILED_FORMAT,
     disable_library_logging,
     get_logger,
-    setup_logging,
+    set_level,
 )
 
-# Module-level logger.  Handlers are attached later by _configure_logging().
-logger = get_logger(__name__)
-
-# ---------------------------------------------------------------------------
-# Logging bootstrap
-# ---------------------------------------------------------------------------
+logger = get_logger(__file__)
 
 _NOISY_LIBRARIES = (
     "pysheds",
@@ -63,33 +57,6 @@ _NOISY_LIBRARIES = (
     "matplotlib",
     "PIL",
 )
-
-
-def _configure_logging(
-    level: str = "INFO",
-    log_file: Optional[Path] = None,
-) -> None:
-    """Configure the module logger via :func:`setup_logging`.
-
-    Called once from :func:`main` after CLI arguments have been parsed so that
-    ``--log-level`` and ``--log-file`` take effect.
-    """
-    global logger
-    logger = setup_logging(
-        name=__name__,
-        level=level.upper(),
-        log_file=log_file,
-        console=True,
-        colored=True,
-        format_string=DETAILED_FORMAT if level.upper() == "DEBUG" else None,
-    )
-
-    # Suppress chatty third-party loggers
-    for lib in _NOISY_LIBRARIES:
-        disable_library_logging(lib)
-        logger.debug("Suppressed noisy logger: %s", lib)
-
-    logger.debug("Logging configured  (level=%s, file=%s)", level, log_file)
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +342,7 @@ def build_dataset(
             _save_checkpoint(gdf, output_path)
 
     # ------------------------------------------------------------------
-    # 4. Final save
+    # 5. Final save
     # ------------------------------------------------------------------
     n_ok = int((gdf["delineation_status"] == "ok").sum())
     n_err = int((gdf["delineation_status"] == "error").sum())
@@ -393,6 +360,9 @@ def build_dataset(
 
     _save_checkpoint(gdf, output_path)
     logger.info("Final output written to %s", output_path)
+
+    # Set all columns to lower case
+    gdf.columns = gdf.columns.str.lower()
 
     return gdf
 
@@ -423,7 +393,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path("outputs/devon_catchments.gpkg"),
+        default=None,
         help="Output GeoPackage path (also used as checkpoint).",
     )
     p.add_argument(
@@ -454,27 +424,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging verbosity level.",
     )
-    p.add_argument(
-        "--log-file",
-        type=Path,
-        default=None,
-        help="Optional path to a log file. Logs are always sent to the "
-        "console; this adds file output as well.",
-    )
+
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    # Configure logging as early as possible so every subsequent message
-    # is properly formatted and routed.
-    _configure_logging(level=args.log_level, log_file=args.log_file)
+    if args.out is None:
+        args.out = args.csv.with_suffix(".gpkg")
+
+    set_level(logger, args.log_level)
+    for lib in _NOISY_LIBRARIES:
+        disable_library_logging(lib)
 
     logger.info("dataset_builder starting")
     logger.debug(
         "Parsed arguments: csv=%s, dem=%s, out=%s, lat_col=%s, lon_col=%s, "
-        "checkpoint_every=%d, flow_acc_threshold=%d, log_level=%s, log_file=%s",
+        "checkpoint_every=%d, flow_acc_threshold=%d, log_level=%s",
         args.csv,
         args.dem,
         args.out,
@@ -483,7 +450,6 @@ def main(argv: list[str] | None = None) -> None:
         args.checkpoint_every,
         args.flow_acc_threshold,
         args.log_level,
-        args.log_file,
     )
 
     if not args.csv.exists():

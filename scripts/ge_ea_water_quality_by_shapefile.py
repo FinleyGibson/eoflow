@@ -60,7 +60,7 @@ from eoflow.ea import EAWaterQualityAPI
 from eoflow.log_utils import get_logger
 from eoflow.utils import load_shapefile
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 # ---------------------------------------------------------------------------
 # Polygon helpers

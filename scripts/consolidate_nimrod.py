@@ -73,7 +73,7 @@ from pathlib import Path
 from eoflow.log_utils import get_logger
 from eoflow.rainfall import consolidate_nimrod
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 
 # ---------------------------------------------------------------------------

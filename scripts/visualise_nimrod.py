@@ -60,6 +60,7 @@ import branca.colormap as cm
 import folium
 import geopandas as gpd
 import iris
+import iris.util
 import numpy as np
 
 from eoflow.log_utils import get_logger
@@ -67,7 +68,7 @@ from eoflow.log_utils import get_logger
 # Suppress Iris metadata warnings about non-contiguous bounds
 warnings.filterwarnings("ignore", category=iris.warnings.IrisVagueMetadataWarning)
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 
 def load_shapefile(shapefile_path: Path) -> gpd.GeoDataFrame:
@@ -169,7 +170,32 @@ def load_and_aggregate_netcdf(
     if not cubes:
         raise ValueError("No cubes could be loaded")
 
-    # Concatenate along time dimension
+    # --- Homogenise cubes before merging ------------------------------------
+    # NIMROD files often carry per-file attributes (e.g. recursive_filter_iterations)
+    # and scalar coordinates whose values differ across timesteps.  Both cause
+    # merge_cube / concatenate_cube to raise.  Strip them first.
+
+    # 1. Remove attributes that are not identical across all cubes.
+    iris.util.equalise_attributes(cubes)
+
+    # 2. Remove scalar coordinates whose value differs across any two cubes.
+    scalar_names = {coord.name() for cube in cubes for coord in cube.coords() if coord.shape == ()}
+    for name in scalar_names:
+        values = []
+        for cube in cubes:
+            try:
+                values.append(str(cube.coord(name).points))
+            except iris.exceptions.CoordinateNotFoundError:
+                values.append(None)
+        if len(set(values)) > 1:
+            logger.debug("Removing differing scalar coordinate: %s", name)
+            for cube in cubes:
+                try:
+                    cube.remove_coord(name)
+                except iris.exceptions.CoordinateNotFoundError:
+                    pass
+
+    # --- Merge / concatenate ------------------------------------------------
     try:
         cube_list = iris.cube.CubeList(cubes)
         merged = cube_list.merge_cube()
@@ -177,8 +203,19 @@ def load_and_aggregate_netcdf(
         # If merge fails, try concatenate
         merged = iris.cube.CubeList(cubes).concatenate_cube()
 
-    # Aggregate if requested
-    if aggregate == "mean":
+    # Check whether time is an actual dimension (>1 point) or scalar.
+    # A scalar / single-point time coordinate cannot be collapsed.
+    try:
+        time_coord = merged.coord("time")
+        has_time_dim = time_coord in merged.dim_coords and time_coord.shape[0] > 1
+    except iris.exceptions.CoordinateNotFoundError:
+        has_time_dim = False
+
+    if not has_time_dim:
+        logger.info("Only one timestep — skipping aggregation.")
+        # Squeeze out any scalar/length-1 time dimension so the result is 2D.
+        aggregated = next(merged.slices(["projection_y_coordinate", "projection_x_coordinate"]))
+    elif aggregate == "mean":
         logger.info("Computing mean across time")
         aggregated = merged.collapsed("time", iris.analysis.MEAN)
     elif aggregate == "max":

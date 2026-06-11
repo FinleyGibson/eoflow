@@ -123,24 +123,63 @@ def setup_logging(
     return logger
 
 
-def get_logger(name: str) -> logging.Logger:
+def get_logger(
+    source: str,
+    *,
+    log_dir: Union[str, Path, None] = "logs",
+    level: Union[str, int] = logging.INFO,
+    colored: bool = True,
+) -> logging.Logger:
     """
-    Get a logger with the specified name.
+    Get a logger, auto-configuring file + console output when *source* is a
+    file path.
 
-    This is a convenience function that returns a logger without configuring it.
-    Use setup_logging() for initial configuration.
+    Pass ``__file__`` from a script to get a fully configured logger.  The
+    ``eoflow`` root logger is set up with a console handler and a log file at
+    ``<log_dir>/<stem>.log``, so all ``eoflow.*`` library messages are
+    captured automatically.  A child logger named
+    ``eoflow.scripts.<stem>`` is returned for the script itself.
+
+    Pass ``__name__`` from library code to get an unconfigured logger that
+    propagates to whatever the application has set up.
 
     Args:
-        name: Logger name (typically __name__ of the calling module).
+        source: ``__file__`` (file path) for scripts, or ``__name__`` (dotted
+            module name) for library code.
+        log_dir: Directory for the log file when *source* is a file path.
+            Pass ``None`` to suppress file logging (console only).
+        level: Logging level applied to both handlers.
+        colored: Whether to use ANSI colours on the console handler.
 
     Returns:
-        Logger instance.
+        Configured Logger instance.
 
     Example:
+        >>> # In a script — auto-creates logs/my_script.log
+        >>> logger = get_logger(__file__)
+        >>>
+        >>> # In library code — unconfigured, propagates up
         >>> logger = get_logger(__name__)
-        >>> logger.info("Module initialized")
     """
-    return logging.getLogger(name)
+    is_file_path = source.endswith(".py") or "/" in source or "\\" in source
+
+    if is_file_path:
+        stem = Path(source).stem
+        log_file = Path(log_dir) / f"{stem}.log" if log_dir is not None else None
+        # Configure the eoflow root logger so all eoflow.* library messages
+        # also go to the console and file without needing per-module setup.
+        setup_logging(
+            "eoflow",
+            level=level,
+            log_file=log_file,
+            console=True,
+            colored=colored,
+        )
+        # Return a named child logger for the script (inherits eoflow's handlers
+        # via propagation; no handlers of its own needed).
+        return logging.getLogger(f"eoflow.scripts.{stem}")
+    else:
+        return logging.getLogger(source)
 
 
 def set_level(logger: Union[logging.Logger, str], level: Union[str, int]) -> None:
