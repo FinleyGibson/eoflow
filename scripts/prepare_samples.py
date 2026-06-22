@@ -7,20 +7,23 @@ indices (NDVI, NDWI) via openEO for each sample, then save each
 fully-populated Sample to disk so that ``extract_features.py`` can
 read them.
 
+Rainfall and EO date windows are specified as a number of days *before*
+each sample's own measurement date, so the window is per-sample rather
+than a single fixed range.
+
 Usage
 -----
   # Defaults: reads outputs/devon_catchments.gpkg -> data/sample_instances/
   python -m scripts.prepare_samples
 
-  # Custom paths
+  # Custom paths, 10-day rainfall window, 30-day EO window
   python -m scripts.prepare_samples \
-      --gpkg    outputs/devon_catchments.gpkg \
-      --dem     data/dems/devon_dem_cop30.tif \
-      --out-dir data/sample_instances \
-      --rainfall-start 2023-01-01 \
-      --rainfall-end   2023-12-31 \
-      --eo-start       2023-01-01 \
-      --eo-end         2023-12-31
+      --gpkg          outputs/devon_catchments.gpkg \
+      --dem           data/dems/devon_dem_cop30.tif \
+      --out-dir       data/sample_instances \
+      --nimrod-dir    data/nimrod_data \
+      --rainfall-days 10 \
+      --eo-days       30
 
   # Skip the EO fetch step
   python -m scripts.prepare_samples --skip-eo
@@ -30,13 +33,14 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Optional, Tuple
 
-from eoflow.log_utils import get_logger
+from eoflow.log_utils import get_logger, set_level
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
 
-logger = get_logger("eoflow.scripts.prepare_samples")
+logger = get_logger(__file__)
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -45,7 +49,7 @@ logger = get_logger("eoflow.scripts.prepare_samples")
 DEFAULT_GPKG: Path = PROJECT_ROOT / "outputs" / "devon_catchments.gpkg"
 DEFAULT_DEM: Path = DATA_DIR / "dems" / "devon_dem_cop30.tif"
 DEFAULT_OUT_DIR: Path = DATA_DIR / "sample_instances"
-DEFAULT_RAINFALL_DIR: Path = DATA_DIR / "temp" / "rainfall"
+DEFAULT_NIMROD_DIR: Path = DATA_DIR / "nimrod_data"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +57,7 @@ DEFAULT_RAINFALL_DIR: Path = DATA_DIR / "temp" / "rainfall"
 # ---------------------------------------------------------------------------
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=(
             "Prepare saved Sample instances from a GeoPackage of delineated "
@@ -84,44 +88,46 @@ def build_parser():
         help="Output directory for saved Sample subdirectories.",
     )
     p.add_argument(
-        "--rainfall-dir",
+        "--nimrod-dir",
         type=Path,
-        default=DEFAULT_RAINFALL_DIR,
+        default=DEFAULT_NIMROD_DIR,
         metavar="DIR",
-        help="Cache directory for Met Office rainfall NetCDF downloads.",
+        help=(
+            "Path to NIMROD data: either a directory of per-timestep NetCDF files "
+            "(as produced by process_nimrod_local.py) or a single consolidated .nc file. "
+            "Omit --rainfall-days to skip rainfall."
+        ),
     )
     p.add_argument(
-        "--rainfall-start",
-        type=str,
+        "--rainfall-days",
+        type=int,
         default=None,
-        metavar="YYYY-MM-DD",
-        help="Start date for rainfall extraction.  Omit to skip rainfall.",
+        metavar="N",
+        help=(
+            "Number of days before each sample's measurement date to use as the "
+            "rainfall window.  Omit to skip rainfall computation."
+        ),
     )
     p.add_argument(
-        "--rainfall-end",
-        type=str,
+        "--eo-days",
+        type=int,
         default=None,
-        metavar="YYYY-MM-DD",
-        help="End date for rainfall extraction.  Omit to skip rainfall.",
-    )
-    p.add_argument(
-        "--eo-start",
-        type=str,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Start date for NDVI/NDWI EO queries.  Omit to use per-sample defaults.",
-    )
-    p.add_argument(
-        "--eo-end",
-        type=str,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="End date for NDVI/NDWI EO queries.  Omit to use per-sample defaults.",
+        metavar="N",
+        help=(
+            "Number of days before each sample's measurement date to use as the "
+            "Sentinel-2 EO window.  Omit to use the openEO per-sample default."
+        ),
     )
     p.add_argument(
         "--skip-eo",
         action="store_true",
         help="Skip the openEO NDVI/NDWI fetch step entirely.",
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity level.",
     )
     p.add_argument(
         "--flow-acc-threshold",
@@ -138,15 +144,19 @@ def build_parser():
 # ---------------------------------------------------------------------------
 
 
-def _parse_date(s):
-    """Parse a YYYY-MM-DD string into a datetime, or return None."""
-    if s is None:
+def _window_for_sample(
+    sample_date: Optional[date],
+    days: int,
+    label: str,
+    tag: str,
+) -> Optional[Tuple[str, str]]:
+    """Return (start_str, end_str) for a days-before window, or None on failure."""
+    if sample_date is None:
+        logger.warning("  %s: no sample date — skipping %s window", tag, label)
         return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%d")
-    except ValueError as exc:
-        logger.error("Invalid date format '%s': %s", s, exc)
-        sys.exit(1)
+    end = sample_date
+    start = end - timedelta(days=days)
+    return start.isoformat(), end.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -154,20 +164,23 @@ def _parse_date(s):
 # ---------------------------------------------------------------------------
 
 
-def main(argv=None):
+def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
 
     # Lazy imports so --help is fast
-    from eoflow.samples import CatchmentDataset
+    from eoflow.samples import CatchmentDataset, Sample
+
+    set_level(logger, args.log_level)
 
     logger.info("=" * 60)
     logger.info("Prepare sample instances")
-    logger.info("  gpkg        : %s", args.gpkg)
-    logger.info("  dem         : %s", args.dem)
-    logger.info("  out-dir     : %s", args.out_dir)
-    logger.info("  rainfall    : %s -> %s", args.rainfall_start, args.rainfall_end)
-    logger.info("  EO window   : %s -> %s", args.eo_start, args.eo_end)
-    logger.info("  skip EO     : %s", args.skip_eo)
+    logger.info("  gpkg           : %s", args.gpkg)
+    logger.info("  dem            : %s", args.dem)
+    logger.info("  out-dir        : %s", args.out_dir)
+    logger.info("  nimrod-dir     : %s", args.nimrod_dir)
+    logger.info("  rainfall-days  : %s", args.rainfall_days)
+    logger.info("  eo-days        : %s", args.eo_days)
+    logger.info("  skip EO        : %s", args.skip_eo)
     logger.info("=" * 60)
 
     # -- Validate inputs ---------------------------------------------------
@@ -177,9 +190,9 @@ def main(argv=None):
     if not args.dem.exists():
         logger.error("DEM not found: %s", args.dem)
         sys.exit(1)
-
-    rainfall_start = _parse_date(args.rainfall_start)
-    rainfall_end = _parse_date(args.rainfall_end)
+    if args.rainfall_days is not None and not args.nimrod_dir.exists():
+        logger.error("NIMROD directory not found: %s", args.nimrod_dir)
+        sys.exit(1)
 
     # -- Load GeoPackage ---------------------------------------------------
     ds = CatchmentDataset.from_gpkg(args.gpkg, only_delineated=True)
@@ -215,31 +228,46 @@ def main(argv=None):
             n_skipped += 1
             continue
 
-        logger.info("  [%d/%d] processing %s ...", i + 1, n_total, tag)
+        logger.info("  [%d/%d] processing %s (date: %s) ...", i + 1, n_total, tag, sample.date)
+
+        # Derive per-sample date windows
+        rainfall_window = None
+        if args.rainfall_days is not None:
+            rainfall_window = _window_for_sample(sample.date, args.rainfall_days, "rainfall", tag)
+            if rainfall_window:
+                logger.info(
+                    "    rainfall window : %s → %s (%d days)",
+                    *rainfall_window,
+                    args.rainfall_days,
+                )
+
+        eo_window = None
+        if args.eo_days is not None:
+            eo_window = _window_for_sample(sample.date, args.eo_days, "EO", tag)
+            if eo_window:
+                logger.info(
+                    "    EO window       : %s → %s (%d days)",
+                    *eo_window,
+                    args.eo_days,
+                )
 
         try:
             # Compute terrain + soil + rainfall layers
             sample.compute_layers(
                 dem_path=args.dem,
-                rainfall_start=rainfall_start,
-                rainfall_end=rainfall_end,
-                rainfall_download_dir=args.rainfall_dir,
+                rainfall_start=rainfall_window[0] if rainfall_window else None,
+                rainfall_end=rainfall_window[1] if rainfall_window else None,
+                rainfall_nimrod_dir=args.nimrod_dir if rainfall_window else None,
                 flow_acc_threshold=args.flow_acc_threshold,
             )
 
             # Fetch NDVI and NDWI from openEO / Sentinel-2
             if conn is not None:
+                eo_start = eo_window[0] if eo_window else None
+                eo_end = eo_window[1] if eo_window else None
                 try:
-                    sample.fetch_ndvi(
-                        conn,
-                        start_date=args.eo_start,
-                        end_date=args.eo_end,
-                    )
-                    sample.fetch_ndwi(
-                        conn,
-                        start_date=args.eo_start,
-                        end_date=args.eo_end,
-                    )
+                    sample.fetch_ndvi(conn, start_date=eo_start, end_date=eo_end)
+                    sample.fetch_ndwi(conn, start_date=eo_start, end_date=eo_end)
                 except Exception as exc:
                     logger.warning("  EO fetch failed for %s: %s", tag, exc)
 

@@ -200,3 +200,6 @@ data/
 # outputs
 outputs/
 external_code/
+
+# checkpoints
+*.checkpoints_*/

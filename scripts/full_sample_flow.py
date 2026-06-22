@@ -17,7 +17,7 @@ from eoflow.samples import Sample
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
 
 # 0 Set up logging
-logger = get_logger("eoflow.scripts.full_sample_flow")
+logger = get_logger(__file__)
 
 # 1. Load Required Data
 

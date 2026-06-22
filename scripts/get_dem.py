@@ -60,7 +60,7 @@ import requests
 
 from eoflow.log_utils import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 # ---------------------------------------------------------------------------
 # Constants

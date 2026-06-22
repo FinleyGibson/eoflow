@@ -65,7 +65,7 @@ from eoflow.catchment import compute_flow_accumulation
 from eoflow.log_utils import get_logger
 from eoflow.utils import load_shapefile
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 # Default paths (relative to the repo root)
 _DEFAULT_GPKG = Path(__file__).resolve().parent.parent / "data" / "devon_water_quality_dataset.gpkg"

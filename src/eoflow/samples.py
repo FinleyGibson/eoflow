@@ -650,12 +650,95 @@ class Sample:
         start: Union[str, datetime],
         end: Union[str, datetime],
         *,
+        nimrod_dir: Union[str, Path],
+    ) -> "xarray.DataArray":
+        """Load and extract NIMROD 1 km composite rainfall data for the catchment.
+
+        Delegates to :func:`eoflow.rainfall.get_nimrod_rainfall_for_polygon`
+        to load pre-processed NIMROD data from disk and stores the result in
+        :attr:`layers.rainfall`.
+
+        Unlike the static layers (topography, slope, soil type), rainfall
+        data carries an explicit temporal dimension: the returned array has
+        shape ``(time, y, x)`` where ``time`` holds UTC timestamps.
+
+        Parameters
+        ----------
+        start : str or datetime
+            Start of the time window (UTC, inclusive).  Either a
+            ``"YYYY-MM-DDTHH:MM"`` / ISO-8601 string or an aware
+            :class:`~datetime.datetime`.
+        end : str or datetime
+            End of the time window (UTC, inclusive).
+        nimrod_dir : str or Path
+            Path to the NIMROD data on disk.  Either:
+
+            * A **directory** of per-timestep NetCDF files in the layout
+              produced by ``scripts/process_nimrod_local.py``::
+
+                  <nimrod_dir>/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
+
+            * A **single consolidated** ``.nc`` file produced by
+              ``scripts/consolidate_nimrod.py``.
+
+        Returns
+        -------
+        xarray.DataArray
+            Rainfall rate in mm/h with dimensions ``(time, y, x)``, CRS
+            EPSG:27700.  Also stored in ``self.layers.rainfall``.
+
+        Raises
+        ------
+        ValueError
+            If the sample has no delineated catchment polygon, or if *end*
+            precedes *start*.
+        """
+        from eoflow.rainfall import get_nimrod_rainfall_for_polygon
+
+        if not self.has_catchment:
+            raise ValueError(
+                f"Sample '{self.id}' has no catchment polygon. "
+                "Run delineate() first, or load a dataset that includes catchments."
+            )
+
+        logger.info(
+            "Fetching NIMROD rainfall for site '%s' (%s → %s) …",
+            self.site_name,
+            start,
+            end,
+        )
+        da = get_nimrod_rainfall_for_polygon(
+            self.catchment,
+            start,
+            end,
+            nimrod_dir=nimrod_dir,
+        )
+        self.layers.rainfall = da
+        n_times = da.sizes.get("time", 0)
+        logger.info(
+            "Rainfall stored: %d timestep(s), grid %d × %d.",
+            n_times,
+            da.sizes.get("y", 0),
+            da.sizes.get("x", 0),
+        )
+        return da
+
+    def _compute_rainfall_metoffice_legacy(
+        self,
+        start: Union[str, datetime],
+        end: Union[str, datetime],
+        *,
         download_dir: Optional[Union[str, Path]] = None,
         res: int = 1000,
         run_hour: Optional[int] = None,
         workers: int = 4,
     ) -> "xarray.DataArray":
-        """Download and extract Met Office UKV rainfall-rate data for the catchment.
+        """[Legacy] Download and extract Met Office UKV rainfall-rate data for the catchment.
+
+        .. deprecated::
+            Use :meth:`compute_rainfall` instead, which loads pre-processed
+            NIMROD 1 km composite data from disk rather than downloading
+            from the Met Office AWS S3 bucket.
 
         Delegates to :func:`eoflow.rainfall.get_rainfall_for_polygon` and
         stores the result in :attr:`layers.rainfall`.
@@ -737,8 +820,7 @@ class Sample:
         *,
         rainfall_start: Union[str, datetime, None] = None,
         rainfall_end: Union[str, datetime, None] = None,
-        rainfall_download_dir: Optional[Union[str, Path]] = None,
-        rainfall_res: int = 1000,
+        rainfall_nimrod_dir: Optional[Union[str, Path]] = None,
         topo_res: int = 50,
         slope_output: Literal["degrees", "percent_rise", "radians"] = "degrees",
         aspect_output: Literal["degrees", "radians"] = "degrees",
@@ -756,8 +838,8 @@ class Sample:
         3. :meth:`compute_slope`
         4. :meth:`compute_aspect`
         5. :meth:`compute_soil_type`
-        6. :meth:`compute_rainfall` — only when both *rainfall_start* and
-           *rainfall_end* are provided.
+        6. :meth:`compute_rainfall` — only when *rainfall_start*,
+           *rainfall_end*, and *rainfall_nimrod_dir* are all provided.
 
         Each step is attempted independently: a failure in one step is logged
         as a warning and execution continues with the next step rather than
@@ -771,10 +853,10 @@ class Sample:
         rainfall_start, rainfall_end : str or datetime, optional
             Time window for rainfall extraction.  If either is ``None``
             (the default) the rainfall step is skipped.
-        rainfall_download_dir : str or Path, optional
-            Cache directory for Met Office NetCDF downloads.
-        rainfall_res : int
-            BNG resolution for the rainfall grid in metres (default: 1000 m).
+        rainfall_nimrod_dir : str or Path, optional
+            Path to the NIMROD data directory (or consolidated ``.nc`` file)
+            used by :meth:`compute_rainfall`.  Required when
+            *rainfall_start* and *rainfall_end* are provided.
         topo_res : int
             BNG resolution for the topography, slope, and aspect grids in
             metres (default: 50 m).
@@ -863,13 +945,16 @@ class Sample:
             )
 
         # --- rainfall (optional) ------------------------------------------
-        if rainfall_start is not None and rainfall_end is not None:
+        if (
+            rainfall_start is not None
+            and rainfall_end is not None
+            and rainfall_nimrod_dir is not None
+        ):
             try:
                 self.compute_rainfall(
                     rainfall_start,
                     rainfall_end,
-                    download_dir=rainfall_download_dir,
-                    res=rainfall_res,
+                    nimrod_dir=rainfall_nimrod_dir,
                 )
             except Exception as exc:
                 logger.warning(
@@ -879,7 +964,8 @@ class Sample:
                 )
         else:
             logger.debug(
-                "Rainfall skipped for site '%s' (no rainfall_start/end provided).",
+                "Rainfall skipped for site '%s' "
+                "(rainfall_start, rainfall_end, or rainfall_nimrod_dir not provided).",
                 self.site_name,
             )
 

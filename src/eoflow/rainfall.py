@@ -1253,6 +1253,275 @@ def get_rainfall_for_polygon(
 
 
 # ---------------------------------------------------------------------------
+# NIMROD 1km composite - load from disk (public)
+# ---------------------------------------------------------------------------
+
+
+def get_nimrod_rainfall_for_polygon(
+    polygon,
+    start: str | datetime,
+    end: str | datetime,
+    *,
+    nimrod_dir: Path | str,
+    parallel: bool = False,
+) -> xr.DataArray:
+    """Load NIMROD 1 km composite rainfall data from disk, clipped to a polygon.
+
+    Reads pre-processed NetCDF files written by :func:`process_nimrod_local`
+    (or a single consolidated file from :func:`consolidate_nimrod`) and
+    returns a rainfall :class:`~xarray.DataArray` masked to the catchment
+    polygon.
+
+    This is the disk-based counterpart to :func:`get_rainfall_for_polygon`
+    and produces a DataArray in the same format: dimensions ``(time, y, x)``,
+    units ``mm/h``, CRS EPSG:27700.
+
+    Parameters
+    ----------
+    polygon :
+        Area of interest in **WGS 84 (EPSG:4326)**.  May be a
+        ``shapely.geometry.Polygon`` or ``MultiPolygon``.
+    start :
+        Start of the valid-time range (UTC, inclusive).  Either a
+        ``YYYY-MM-DDTHH:MM`` / ISO-8601 string or a
+        :class:`~datetime.datetime`.
+    end :
+        End of the valid-time range (UTC, inclusive).
+    nimrod_dir :
+        Path to the NIMROD data on disk.  Either:
+
+        * A **directory** of per-timestep NetCDF files in the layout
+          produced by :func:`process_nimrod_local`::
+
+              <nimrod_dir>/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
+
+        * A **single consolidated** ``.nc`` file produced by
+          :func:`consolidate_nimrod`.
+    parallel :
+        If ``True``, open the per-timestep files concurrently via
+        ``dask.delayed`` (faster for large time ranges, but may cause
+        issues in some multiprocessing environments).  Defaults to
+        ``False``.
+
+    Returns
+    -------
+    xarray.DataArray
+        Rainfall rate with dimensions ``(time, y, x)``:
+
+        - ``time``  – UTC timestamps.
+        - ``y``     – BNG northings (metres, EPSG:27700), south-to-north.
+        - ``x``     – BNG eastings (metres, EPSG:27700), west-to-east.
+
+        Grid cells outside *polygon* are ``NaN``.  Returns an **empty**
+        DataArray (shape ``(0, 0, 0)``) when no data are found.
+
+        ``attrs`` on the returned array:
+
+        - ``units``      ``"mm/h"``
+        - ``long_name``  ``"Rainfall rate"``
+        - ``crs``        ``"EPSG:27700"``
+        - ``source``     ``"NIMROD 1km composite"``
+
+    Raises
+    ------
+    ValueError
+        If *end* is before *start*, or if the polygon has zero BNG area.
+    """
+    import shapely
+
+    if isinstance(start, str):
+        start = parse_datetime(start)
+    if isinstance(end, str):
+        end = parse_datetime(end)
+
+    if end < start:
+        raise ValueError("'end' must be >= 'start'")
+
+    nimrod_path = Path(nimrod_dir)
+
+    # --- Reproject polygon to BNG and get bounding box -----------------------
+    polygon_bng = _polygon_to_bng(polygon)
+    if polygon_bng.area == 0.0:
+        raise ValueError("Input polygon has zero area after reprojection to BNG.")
+
+    x_min_bb, y_min_bb, x_max_bb, y_max_bb = polygon_bng.bounds
+
+    logger.info("get_nimrod_rainfall_for_polygon")
+    logger.info(
+        "  Polygon BNG bounds : %.0f, %.0f \u2192 %.0f, %.0f",
+        x_min_bb,
+        y_min_bb,
+        x_max_bb,
+        y_max_bb,
+    )
+    logger.info("  Time range         : %s \u2192 %s", start.isoformat(), end.isoformat())
+    logger.info("  NIMROD source      : %s", nimrod_path)
+
+    _empty_da = xr.DataArray(
+        data=np.empty((0, 0, 0), dtype=np.float32),
+        dims=["time", "y", "x"],
+        name="rainfall_rate",
+        attrs={"units": "mm/h", "crs": "EPSG:27700"},
+    )
+
+    # BNG projection coordinate names used by Iris-saved NetCDF files
+    _X = "projection_x_coordinate"
+    _Y = "projection_y_coordinate"
+
+    def _fix_time(ds: xr.Dataset) -> xr.Dataset:
+        """Promote a scalar time coordinate to a 1-element dimension.
+
+        Iris saves single-timestep cubes with time as a 0-d (scalar)
+        coordinate.  xarray needs it to be a 1-element dimension so that
+        ``concat_dim="time"`` can stack multiple files.
+        """
+        if "time" in ds.coords and ds["time"].ndim == 0:
+            return ds.expand_dims("time")
+        return ds
+
+    # --- Load from disk -------------------------------------------------------
+    try:
+        if nimrod_path.is_file():
+            # Single consolidated .nc file
+            logger.info("Opening consolidated NIMROD file: %s", nimrod_path.name)
+            ds = xr.open_dataset(nimrod_path, chunks={"time": 288})
+            # Slice to the requested time window
+            if "time" in ds.coords:
+                t0 = np.datetime64(start.replace(tzinfo=None), "ns")
+                t1 = np.datetime64(end.replace(tzinfo=None), "ns")
+                ds = ds.sel(time=slice(t0, t1))
+        else:
+            # Directory of per-timestep files produced by process_nimrod_local
+            # find_nimrod_nc_files expects naive datetimes (file stems have no tz)
+            start_naive = start.replace(tzinfo=None)
+            end_naive = end.replace(tzinfo=None)
+            nc_files, n_skipped = find_nimrod_nc_files(nimrod_path, start_naive, end_naive)
+            if not nc_files:
+                logger.warning(
+                    "No NIMROD NetCDF files found in %s for %s \u2192 %s",
+                    nimrod_path,
+                    start.isoformat(),
+                    end.isoformat(),
+                )
+                return _empty_da
+            logger.info(
+                "Found %d file(s) (%d outside requested range), loading ...",
+                len(nc_files),
+                n_skipped,
+            )
+            ds = xr.open_mfdataset(
+                [str(f) for f in nc_files],
+                parallel=parallel,
+                preprocess=_fix_time,
+                combine="nested",
+                concat_dim="time",
+                chunks={"time": 288},
+                compat="override",
+                coords="minimal",
+            )
+    except Exception as exc:
+        logger.error("Failed to load NIMROD data from %s: %s", nimrod_path, exc, exc_info=True)
+        return _empty_da
+
+    # --- Verify expected BNG projection coordinates are present --------------
+    for coord in (_X, _Y):
+        if coord not in ds.coords:
+            logger.error(
+                "Expected BNG coordinate '%s' not found in dataset. Available: %s",
+                coord,
+                list(ds.coords),
+            )
+            return _empty_da
+
+    # --- Spatial clip to polygon bounding box --------------------------------
+    x_vals = ds[_X].values
+    y_vals = ds[_Y].values
+
+    x_idx = np.where((x_vals >= x_min_bb) & (x_vals <= x_max_bb))[0]
+    y_idx = np.where((y_vals >= y_min_bb) & (y_vals <= y_max_bb))[0]
+
+    if x_idx.size == 0 or y_idx.size == 0:
+        logger.warning(
+            "Polygon bounds do not intersect the NIMROD grid "
+            "(x: %.0f\u2013%.0f m, y: %.0f\u2013%.0f m).",
+            x_min_bb,
+            x_max_bb,
+            y_min_bb,
+            y_max_bb,
+        )
+        return _empty_da
+
+    ds_clip = ds.isel({_X: x_idx, _Y: y_idx})  # type: ignore[arg-type]
+
+    # --- Select the primary data variable ------------------------------------
+    data_vars = list(ds_clip.data_vars)
+    if not data_vars:
+        logger.error("No data variables found in NIMROD dataset.")
+        return _empty_da
+
+    var_name = data_vars[0]
+    if len(data_vars) > 1:
+        logger.debug("Multiple variables found (%s); using '%s'.", data_vars, var_name)
+
+    da = ds_clip[var_name].load()
+
+    # --- Strip NIMROD missing-data sentinels ---------------------------------
+    # Existing on-disk files processed before the read_nimrod_file fix was
+    # applied will not have a _FillValue attribute, so xarray cannot mask the
+    # sentinel automatically.  Explicitly mask anything above the threshold.
+    n_sentinel = int((da > NIMROD_FILL_THRESHOLD).sum())
+    if n_sentinel > 0:
+        logger.debug(
+            "Masking %d sentinel value(s) (> %.0e) in loaded data.",
+            n_sentinel,
+            NIMROD_FILL_THRESHOLD,
+        )
+        da = da.where(da <= NIMROD_FILL_THRESHOLD)
+
+    # --- Rename BNG projection coordinate names to short y / x ---------------
+    rename_map = {k: v for k, v in {_Y: "y", _X: "x"}.items() if k in da.dims}
+    if rename_map:
+        da = da.rename(rename_map)
+
+    # --- Build polygon mask --------------------------------------------------
+    x_clipped = da.coords["x"].values
+    y_clipped = da.coords["y"].values
+
+    xx, yy = np.meshgrid(x_clipped, y_clipped)
+    grid_points = shapely.points(xx.ravel(), yy.ravel())
+    inside_mask = shapely.within(grid_points, polygon_bng).reshape(xx.shape)
+
+    n_inside = int(inside_mask.sum())
+    logger.info(
+        "  Polygon covers %d / %d pixel(s) (%.1f %%) on the clipped grid.",
+        n_inside,
+        inside_mask.size,
+        100.0 * n_inside / inside_mask.size if inside_mask.size > 0 else 0.0,
+    )
+
+    da_masked = da.where(inside_mask)
+
+    # --- Finalise metadata ---------------------------------------------------
+    da_masked.name = "rainfall_rate"
+    da_masked.attrs = {
+        "units": "mm/h",
+        "long_name": "Rainfall rate",
+        "crs": "EPSG:27700",
+        "source": "NIMROD 1km composite",
+    }
+
+    n_times = da_masked.sizes.get("time", 0)
+    logger.info(
+        "Rainfall stored: %d timestep(s), grid %d (y) \u00d7 %d (x).",
+        n_times,
+        da_masked.sizes.get("y", 0),
+        da_masked.sizes.get("x", 0),
+    )
+
+    return da_masked
+
+
+# ---------------------------------------------------------------------------
 # NIMROD 1km composite - constants
 # ---------------------------------------------------------------------------
 
@@ -1482,8 +1751,21 @@ def extract_nimrod_tar(tar_path: Path, extract_dir: Path) -> list[Path]:
     return sorted(extracted)
 
 
+#: NIMROD missing-data sentinel value.  The NIMROD binary format stores
+#: missing/undetected cells as the integer code ``-32768``; after Iris applies
+#: the per-file scale factor and offset this becomes a large float (~9.97e36).
+#: Iris does not write this as ``_FillValue`` in the saved NetCDF, so it must
+#: be masked explicitly.  Any value above this threshold is treated as missing.
+NIMROD_FILL_THRESHOLD: float = 1e36
+
+
 def read_nimrod_file(dat_gz_path: Path) -> iris.cube.Cube | None:
     """Decompress and load a NIMROD ``.dat.gz`` file as an Iris cube.
+
+    Missing-data sentinel values (stored as large floats by Iris rather than
+    as a NetCDF ``_FillValue`` attribute) are masked before the cube is
+    returned, so that :func:`save_nimrod_cube` writes a proper
+    ``_FillValue`` to disk.
 
     Parameters
     ----------
@@ -1493,7 +1775,7 @@ def read_nimrod_file(dat_gz_path: Path) -> iris.cube.Cube | None:
     Returns
     -------
     iris.cube.Cube or None
-        Loaded cube, or ``None`` if reading fails.
+        Loaded cube with sentinel values masked, or ``None`` if reading fails.
     """
     tmp: Path | None = None
     try:
@@ -1501,7 +1783,11 @@ def read_nimrod_file(dat_gz_path: Path) -> iris.cube.Cube | None:
             tmp = Path(fh.name)
         with gzip.open(dat_gz_path, "rb") as gz, open(tmp, "wb") as out:
             shutil.copyfileobj(gz, out)
-        return iris.load_cube(str(tmp))
+        cube = iris.load_cube(str(tmp))
+        # Mask the NIMROD missing-data sentinel before returning so that
+        # downstream saves write a proper _FillValue to NetCDF.
+        cube.data = np.ma.masked_where(cube.data > NIMROD_FILL_THRESHOLD, cube.data)
+        return cube
     except Exception as exc:
         logger.error("Failed to read %s: %s", dat_gz_path, exc)
         return None

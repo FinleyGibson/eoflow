@@ -65,7 +65,7 @@ from pathlib import Path
 from eoflow.log_utils import get_logger
 from eoflow.rainfall import UK_BNG_EXTENT, convert_rainfall
 
-logger = get_logger(__name__)
+logger = get_logger(__file__)
 
 
 # ---------------------------------------------------------------------------

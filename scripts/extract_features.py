@@ -33,7 +33,7 @@ from eoflow.features import extract_features_batch
 from eoflow.log_utils import get_logger
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
 
-logger = get_logger("eoflow.scripts.extract_features")
+logger = get_logger(__file__)
 
 
 # ---------------------------------------------------------------------------
