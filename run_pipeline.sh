@@ -116,8 +116,8 @@ fi
 if [ -f "$GPKG" ]; then
     step_skip 3 "$GPKG already exists — will resume/reuse"
 fi
-step_start 3 "Build catchment dataset"
-python -m scripts.dataset_builder \
+step_start 3 "Delineate catchments for dataset"
+python -m scripts.delineate_catchments \
     --csv  "$WQ_CSV" \
     --dem  "$DEM" \
     --out  "$GPKG" \

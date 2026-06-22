@@ -51,7 +51,7 @@ _S2_BANDS: Dict[str, Dict[str, str]] = {
     "NDRE": {"rededge": "B05", "red": "B04"},
 }
 
-# Columns written by dataset_builder that we care about
+# Columns written by delineate_catchments that we care about
 _COL_LAT = "latitude"
 _COL_LON = "longitude"
 _COL_SNAP_LAT = "snap_latitude"
@@ -162,7 +162,7 @@ class CatchmentLayers:
 class Sample:
     """A single water-quality sampling point with optional catchment geometry.
 
-    Wraps one row from the GeoPackage produced by ``dataset_builder.py`` and
+    Wraps one row from the GeoPackage produced by ``delineate_catchments.py`` and
     exposes typed property accessors for the most-used fields (site name,
     notation, coordinates, measurement result, date …).  When catchment
     delineation has been run the polygon is stored in :attr:`catchment` and
@@ -2000,7 +2000,7 @@ CatchmentSample = Sample
 class CatchmentDataset:
     """A collection of :class:`Sample` objects.
 
-    Load from the GeoPackage produced by ``dataset_builder.py`` with
+    Load from the GeoPackage produced by ``delineate_catchments.py`` with
     :meth:`from_gpkg`, then iterate, filter, and query EO data.
 
     Parameters
@@ -2033,7 +2033,7 @@ class CatchmentDataset:
     ) -> "CatchmentDataset":
         """Load a :class:`CatchmentDataset` from a GeoPackage file.
 
-        The GeoPackage must be in the format written by ``dataset_builder.py``
+        The GeoPackage must be in the format written by ``delineate_catchments.py``
         — specifically it needs a geometry column holding catchment polygons
         and (optionally) ``latitude``, ``longitude``, ``snap_latitude``,
         ``snap_longitude``, ``flow_acc_at_pour_point`` columns.
@@ -2127,7 +2127,7 @@ class CatchmentDataset:
         Parameters
         ----------
         gdf : geopandas.GeoDataFrame
-            GeoDataFrame in the format produced by ``dataset_builder.py``.
+            GeoDataFrame in the format produced by ``delineate_catchments.py``.
         source_path : Path, optional
             Optional path to record as the data source.
         """

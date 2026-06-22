@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_GPKG,
         metavar="FILE",
-        help="Input GeoPackage produced by dataset_builder.py.",
+        help="Input GeoPackage produced by delineate_catchments.py.",
     )
     p.add_argument(
         "--dem",

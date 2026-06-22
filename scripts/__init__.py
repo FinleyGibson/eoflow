@@ -10,7 +10,7 @@ __all__ = [
     # DEM
     "get_dem",
     # Catchment delineation
-    "dataset_builder",
+    "delineate_catchments",
     "delineate_catchment",
     # NIMROD rainfall
     "process_nimrod_local",

@@ -99,12 +99,12 @@ the relevant area is stored.
 
 ## Step 3 — Build the catchment dataset
 
-Run `dataset_builder.py` to iterate over every sample in the CSV, delineate
+Run `delineate_catchments.py` to iterate over every sample in the CSV, delineate
 its upstream catchment from the DEM using D8 flow routing, and assemble the
 results into a GeoPackage.
 
 ```bash
-python -m scripts.dataset_builder \
+python -m scripts.delineate_catchments \
     --csv  data/wq_samples/devon_turbidity_2023.csv \
     --dem  data/dems/devon_dem_cop30.tif \
     --out  outputs/devon_catchments.gpkg
@@ -212,7 +212,7 @@ python -m scripts.prepare_samples --skip-eo
 
 | Flag                   | Default                             | Description                                                         |
 | ---------------------- | ----------------------------------- | ------------------------------------------------------------------- |
-| `--gpkg`               | `outputs/devon_catchments.gpkg`     | Input GeoPackage from dataset_builder.py                            |
+| `--gpkg`               | `outputs/devon_catchments.gpkg`     | Input GeoPackage from delineate_catchments.py                            |
 | `--dem`                | `data/dems/devon_dem_cop30.tif`     | DEM GeoTIFF for topography / slope / aspect                        |
 | `--out-dir`            | `data/sample_instances`             | Output directory for saved Sample subdirectories                    |
 | `--rainfall-dir`       | `data/temp/rainfall`                | Cache directory for Met Office rainfall downloads                   |
@@ -369,7 +369,7 @@ python -m scripts.extract_features \
 ## Full pipeline (one-liner summary)
 
 ```
-ge_ea_water_quality_by_shapefile -> dataset_builder -> prepare_samples -> extract_features -> visualise_ea_samples
+ge_ea_water_quality_by_shapefile -> delineate_catchments -> prepare_samples -> extract_features -> visualise_ea_samples
          (API fetch)              (DEM delineation)   (layers + EO)    (feature CSV)        (interactive map)
 ```
 
@@ -381,7 +381,7 @@ python -m scripts.ge_ea_water_quality_by_shapefile \
     --out data/wq_samples/devon_turbidity_2023.csv
 
 # 2 -- build catchments
-python -m scripts.dataset_builder \
+python -m scripts.delineate_catchments \
     --csv  data/wq_samples/devon_turbidity_2023.csv \
     --dem  data/dems/devon_dem_cop30.tif \
     --out  outputs/devon_catchments.gpkg \

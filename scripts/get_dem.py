@@ -5,7 +5,7 @@ bounding box from the `OpenTopography API <https://opentopography.org>`__.
 The output GeoTIFF is written in **EPSG:4326** (WGS 84) with int16 elevation
 values and a nodata value of -32768, matching the format expected by
 :func:`eoflow.catchment.delineate_catchment` and the ``--dem`` argument in
-:mod:`scripts.dataset_builder`.
+:mod:`scripts.delineate_catchments`.
 
 Prerequisites
 -------------
@@ -385,7 +385,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "Download a GeoTIFF DEM for a country or bounding box from the "
             "OpenTopography API.  The result is ready for use with "
-            "scripts.dataset_builder --dem."
+            "scripts.delineate_catchments --dem."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(

@@ -17,7 +17,7 @@ The workflow is:
 The output GeoTIFF is written in **EPSG:4326** with int16 elevation values
 and a nodata value of −32 768, matching the format expected by
 :func:`eoflow.catchment.delineate_catchment` and the ``--dem`` argument in
-:mod:`scripts.dataset_builder`.
+:mod:`scripts.delineate_catchments`.
 
 Prerequisites
 -------------

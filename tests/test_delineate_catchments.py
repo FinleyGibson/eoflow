@@ -1,5 +1,5 @@
 """
-Unit tests for the dataset_builder script.
+Unit tests for the delineate_catchments script.
 
 These tests exercise the CLI argument parser, the core ``build_dataset``
 function, checkpoint save / load / resume, location-cache construction,
@@ -8,7 +8,7 @@ real DEM data.  ``_delineate_catchment_core`` is mocked throughout.
 
 The tests mirror a real invocation such as::
 
-    uv run scripts/dataset_builder.py \
+    uv run scripts/delineate_catchments.py \
         --csv ./data/devon_water_quality.csv \
         --out data/devon_water_quality_dataset.gpkg \
         --dem data/devon_dem.tif \
@@ -27,7 +27,7 @@ import pandas as pd
 import pytest
 from shapely.geometry import Point, Polygon
 
-from scripts.dataset_builder import (
+from scripts.delineate_catchments import (
     CHECKPOINT_LAYER,
     _build_location_cache,
     _load_checkpoint,
@@ -245,7 +245,7 @@ class TestParseArgs:
 class TestBuildDataset:
     """Test the core ``build_dataset`` function with mocked delineation."""
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_basic_run(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """All rows succeed – every row should have status 'ok'."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
@@ -263,7 +263,7 @@ class TestBuildDataset:
         assert (gdf["delineation_status"] == "ok").all()
         assert (gdf["delineation_error"] == "").all()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_output_gpkg_created(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
@@ -277,7 +277,7 @@ class TestBuildDataset:
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_catchment_geometry_is_polygon(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -294,7 +294,7 @@ class TestBuildDataset:
         for geom in gdf["catchment"]:
             assert isinstance(geom, Polygon)
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_delineation_called_per_unique_location(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -322,7 +322,7 @@ class TestBuildDataset:
         # 2 unique locations → 2 calls
         assert mock_delineate.call_count == 2
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_duplicate_locations_share_polygon(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -349,7 +349,7 @@ class TestBuildDataset:
 
         assert gdf.iloc[0]["catchment"].equals(gdf.iloc[1]["catchment"])
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_delineation_failure_recorded(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -366,7 +366,7 @@ class TestBuildDataset:
         assert (gdf["delineation_status"] == "error").all()
         assert (gdf["delineation_error"] == "DEM out of bounds").all()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_partial_failure(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """Some locations succeed, others fail."""
         call_count = {"n": 0}
@@ -392,7 +392,7 @@ class TestBuildDataset:
         assert n_ok == 2
         assert n_err == 2
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_missing_column_raises(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         csv = tmp_dir / "bad.csv"
         pd.DataFrame({"x": [1], "y": [2]}).to_csv(csv, index=False)
@@ -406,7 +406,7 @@ class TestBuildDataset:
                 lon_col="longitude",
             )
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_nan_coordinates_dropped(
         self, mock_delineate, csv_path_with_nan, dem_path, output_path
     ) -> None:
@@ -424,7 +424,7 @@ class TestBuildDataset:
         assert len(gdf) == 4
         assert (gdf["delineation_status"] == "ok").all()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_flow_acc_threshold_forwarded(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -442,7 +442,7 @@ class TestBuildDataset:
         for call in mock_delineate.call_args_list:
             assert call.kwargs["flow_acc_threshold"] == 2500
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_point_constructed_as_lon_lat(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -464,7 +464,7 @@ class TestBuildDataset:
         assert called_point.x == pytest.approx(-3.53)
         assert called_point.y == pytest.approx(50.72)
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_result_has_expected_columns(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -485,7 +485,7 @@ class TestBuildDataset:
         assert "longitude" in gdf.columns
         assert "sample_id" in gdf.columns
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_original_csv_columns_preserved(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -512,7 +512,7 @@ class TestBuildDataset:
 class TestCheckpointing:
     """Save / load / resume checkpoint round-trips."""
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_checkpoint_file_written(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
@@ -526,7 +526,7 @@ class TestCheckpointing:
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_checkpoint_round_trip(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """Write → reload checkpoint; row count and status must survive."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
@@ -543,7 +543,7 @@ class TestCheckpointing:
         assert loaded is not None
         assert len(loaded) == len(gdf)
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_resume_skips_already_delineated(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -573,7 +573,7 @@ class TestCheckpointing:
         )
         assert mock_delineate.call_count == 0
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_periodic_checkpoint(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         """With checkpoint_every=2 and 4 locations, at least one mid-run save."""
         csv = tmp_dir / "big.csv"
@@ -602,7 +602,7 @@ class TestCheckpointing:
         result = _load_checkpoint(bad_file)
         assert result is None
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_checkpoint_with_mismatched_length_reuses_cache(
         self, mock_delineate, tmp_dir, dem_path
     ) -> None:
@@ -742,7 +742,7 @@ class TestBuildLocationCache:
 class TestMainCLI:
     """Test the ``main()`` entry-point that wires up CLI → build_dataset."""
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_runs_end_to_end(self, mock_delineate, cli_argv, output_path) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
@@ -750,14 +750,14 @@ class TestMainCLI:
 
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_with_log_level(self, mock_delineate, cli_argv) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--log-level", "DEBUG"])
         # No exception means logging configured correctly at DEBUG
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_with_log_file(self, mock_delineate, cli_argv, tmp_dir) -> None:
         log_file = tmp_dir / "run.log"
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
@@ -799,14 +799,14 @@ class TestMainCLI:
         with pytest.raises(SystemExit):
             main(argv)
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_custom_checkpoint_every(self, mock_delineate, cli_argv) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         main(cli_argv + ["--checkpoint-every", "2"])
         # Should not raise
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_custom_flow_acc(self, mock_delineate, cli_argv) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
@@ -824,7 +824,7 @@ class TestMainCLI:
 class TestEdgeCases:
     """Boundary conditions and unusual inputs."""
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_single_row_csv(self, mock_delineate, tmp_dir, dem_path, output_path) -> None:
         csv = tmp_dir / "one.csv"
         _write_csv(csv, n_rows=1)
@@ -850,7 +850,7 @@ class TestEdgeCases:
         raises=ValueError,
         strict=True,
     )
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_all_rows_nan_produces_empty_result(
         self, mock_delineate, tmp_dir, dem_path, output_path
     ) -> None:
@@ -870,7 +870,7 @@ class TestEdgeCases:
         assert len(gdf) == 0
         mock_delineate.assert_not_called()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_large_checkpoint_interval(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -889,7 +889,7 @@ class TestEdgeCases:
         assert len(gdf) == 4
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_dem_path_coerced_to_path(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -906,7 +906,7 @@ class TestEdgeCases:
 
         assert len(gdf) == 4
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_every_delineation_raises(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
@@ -925,7 +925,7 @@ class TestEdgeCases:
         assert (gdf["delineation_status"] == "error").all()
         assert output_path.exists()
 
-    @patch("scripts.dataset_builder._delineate_catchment_core")
+    @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_checkpoint_every_one(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """checkpoint_every=1 saves after every delineation."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)

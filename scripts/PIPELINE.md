@@ -39,14 +39,14 @@ CEDA_TOKEN=your_token_here
 
     > _Optional QA:_ `visualise_ea_samples.py` — plot sampling locations on an interactive map to check spatial coverage and distribution of values
 
-3. **`dataset_builder.py`** — _needs: clean CSV + DEM_
+3. **`delineate_catchments.py`** — _needs: clean CSV + DEM_
    For each unique sampling location: snap to the nearest stream, run pysheds D8 delineation, and store the catchment polygon → GeoPackage (`.gpkg`)
     - Caches results per unique lat/lon so repeated locations are only computed once
     - Checkpoints periodically so a crash can be resumed
     - `delineate_catchment.py` is the single-point equivalent, useful for inspecting one site
 
     ```
-    python -m scripts.dataset_builder \
+    python -m scripts.delineate_catchments \
         --csv  data/ea_samples.csv \
         --dem  data/dems/dem.tif \
         --out  outputs/catchments.gpkg
@@ -125,7 +125,7 @@ Several scripts are the non-interactive equivalents of a notebook. The table bel
 | Script                          | Notebook                            | What it covers                                                                                                                                  |
 | ------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `get_ea_water_quality.py`       | `environment_agency_api_demo.ipynb` | Querying the EA Water Quality API; filtering observations by area or geography                                                                  |
-| `dataset_builder.py`            | `dataset_builder_demo.ipynb`        | Batch catchment delineation from a CSV of sampling points — DEM loading, pour-point snapping, D8 watershed extraction, GeoPackage checkpointing |
+| `delineate_catchments.py`            | `delineate_catchments_demo.ipynb`        | Batch catchment delineation from a CSV of sampling points — DEM loading, pour-point snapping, D8 watershed extraction, GeoPackage checkpointing |
 | `delineate_catchment.py`        | `catchment_delineation.ipynb`       | Single-site walkthrough of the full delineation pipeline — pit filling, flow direction, accumulation, and polygon extraction                    |
 | `visualise_ea_samples.py`       | `environment_agency_api_demo.ipynb` | Interactive map of EA sampling locations with values colour-coded by determinand                                                                |
 | `visualise_dem.py`              | `topography.ipynb`                  | DEM rendered as a colour-coded raster overlay; elevation, slope, and aspect across the study area                                               |

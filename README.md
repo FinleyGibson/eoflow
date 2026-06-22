@@ -106,7 +106,7 @@ values) to a GeoPackage. Progress is checkpointed so the run can be safely
 interrupted and resumed.
 
 ```shell
-python -m scripts.dataset_builder \
+python -m scripts.delineate_catchments \
     --csv  data/devon_turbidity_2023.csv \
     --dem  data/devon_dem.tif \
     --out  data/devon_water_quality_dataset.gpkg \

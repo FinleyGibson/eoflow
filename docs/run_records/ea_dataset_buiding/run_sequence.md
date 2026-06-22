@@ -45,7 +45,7 @@ scp out/ea_turbidity_2010-2024_clean.csv fjg205@10.121.4.88:/home/fjg205/project
 4. Delinated catchments
 
 ```bash
-sh -c 'uv run scripts/dataset_builder.py --csv assets/turbidity_samples/ea_turbidity_2010-2024_clean.csv --out assets/sample_catchments/ea_turbidity_2010-2024_catchments_$1.gpkg --DEM assets/devon_dem_cop30.tif --lat-col latitude --lon-col longitude --log-file logs/ea_turbidity_2010-2014_$1.log' _ 00
+sh -c 'uv run scripts/delineate_catchments.py --csv assets/turbidity_samples/ea_turbidity_2010-2024_clean.csv --out assets/sample_catchments/ea_turbidity_2010-2024_catchments_$1.gpkg --DEM assets/devon_dem_cop30.tif --lat-col latitude --lon-col longitude --log-file logs/ea_turbidity_2010-2014_$1.log' _ 00
 ```
 
 Note: Wrapped in` sh -c` to set $1 to 00 in case it needs repeating.

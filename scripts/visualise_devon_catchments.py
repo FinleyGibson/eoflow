@@ -2,7 +2,7 @@
 Visualise Devon water-quality sample points with their delineated
 catchment polygons on an interactive map.
 
-Reads the GeoPackage produced by ``dataset_builder.py`` and the Devon
+Reads the GeoPackage produced by ``delineate_catchments.py`` and the Devon
 DEM GeoTIFF, then displays:
 
 * The Devon county boundary (from the shapefile)
@@ -448,7 +448,7 @@ def visualise(
     Parameters
     ----------
     gpkg_path : Path
-        GeoPackage produced by ``dataset_builder.py``.
+        GeoPackage produced by ``delineate_catchments.py``.
     dem_path : Path or None
         Devon DEM GeoTIFF. If provided, rendered as a semi-transparent
         elevation overlay and used to compute the flow-accumulation layer.
@@ -917,7 +917,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gpkg",
         type=Path,
         default=_DEFAULT_GPKG,
-        help="Path to the GeoPackage produced by dataset_builder.py.",
+        help="Path to the GeoPackage produced by delineate_catchments.py.",
     )
     p.add_argument(
         "--dem",
