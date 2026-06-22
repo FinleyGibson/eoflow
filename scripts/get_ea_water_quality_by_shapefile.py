@@ -13,7 +13,7 @@ clipped to the polygon extracted from the supplied shapefile.
 
 Usage
 -----
-    python -m scripts.get_devon_water_quality \
+    python -m scripts.get_ea_water_quality_by_shapefile
         --shapefile data/my_region \
         --determinand 0076 \
         --start-date 2023-01-01 \

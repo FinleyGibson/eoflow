@@ -12,7 +12,7 @@ Features
 
 Usage
 -----
-    python -m scripts.dataset_builder \
+    python -m scripts.delineate_catchments \
        --csv  data/wq_samples/devon_water_quality_10.csv \
        --dem  data/dems/devon_dem_cop30.tif \
        --out  out/devon_catchments_10.gpkg
@@ -23,7 +23,7 @@ Usage
         --lat-col   lat               # column name for latitude
         --lon-col   long              # column name for longitude
         --log-level DEBUG             # logging verbosity
-        --log-file  logs/builder.log  # write logs to file as well
+        --log-file  logs/delineate_catchments.log  # write logs to file as well
 """
 
 from __future__ import annotations
@@ -438,7 +438,7 @@ def main(argv: list[str] | None = None) -> None:
     for lib in _NOISY_LIBRARIES:
         disable_library_logging(lib)
 
-    logger.info("dataset_builder starting")
+    logger.info("delineate_catchments starting")
     logger.debug(
         "Parsed arguments: csv=%s, dem=%s, out=%s, lat_col=%s, lon_col=%s, "
         "checkpoint_every=%d, flow_acc_threshold=%d, log_level=%s",
@@ -473,7 +473,7 @@ def main(argv: list[str] | None = None) -> None:
         flow_acc_threshold=args.flow_acc_threshold,
     )
 
-    logger.info("dataset_builder finished")
+    logger.info("delineate_catchments finished")
 
 
 if __name__ == "__main__":
