@@ -1,5 +1,5 @@
 """
-Dataset builder: iterate over water quality samples from a CSV, delineate
+Delineate catchments: iterate over water quality samples from a CSV, delineate
 catchments with pysheds, and produce a GeoDataFrame with catchment polygons.
 
 Features
@@ -32,6 +32,7 @@ import argparse
 import sys
 import time
 import traceback
+from logging import FileHandler
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -136,7 +137,7 @@ def _build_location_cache(
             key = (float(row[lat_col]), float(row[lon_col]))
             snap_lon = row.get("snap_longitude")
             snap_lat = row.get("snap_latitude")
-            if pd.notna(snap_lon) and pd.notna(snap_lat):
+            if bool(pd.notna(snap_lon)) and bool(pd.notna(snap_lat)):
                 snap_pt: Optional[Point] = Point(float(snap_lon), float(snap_lat))
             else:
                 snap_pt = None
@@ -147,7 +148,7 @@ def _build_location_cache(
     return cache
 
 
-def build_dataset(
+def delineate_catchments(
     csv_path: Path,
     dem_path: Path,
     output_path: Path,
@@ -299,6 +300,7 @@ def build_dataset(
                 point=point,
                 dem_path=dem_path,
                 flow_acc_threshold=flow_acc_threshold,
+                logger=logger,
             )
             elapsed = time.perf_counter() - t0
             cache[loc_key] = (polygon, snapped_point, flow_acc)
@@ -424,6 +426,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging verbosity level.",
     )
+    p.add_argument(
+        "--log-file",
+        default=None,
+        help="Directory to save log files.",
+    )
 
     return p.parse_args(argv)
 
@@ -435,6 +442,9 @@ def main(argv: list[str] | None = None) -> None:
         args.out = args.csv.with_suffix(".gpkg")
 
     set_level(logger, args.log_level)
+    if args.log_file:
+        logger.addHandler(FileHandler(args.log_file))
+
     for lib in _NOISY_LIBRARIES:
         disable_library_logging(lib)
 
@@ -450,6 +460,7 @@ def main(argv: list[str] | None = None) -> None:
         args.checkpoint_every,
         args.flow_acc_threshold,
         args.log_level,
+        args.log_file,
     )
 
     if not args.csv.exists():
@@ -463,7 +474,7 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("DEM path  : %s", args.dem.resolve())
     logger.info("Output    : %s", args.out.resolve())
 
-    build_dataset(
+    delineate_catchments(
         csv_path=args.csv,
         dem_path=args.dem,
         output_path=args.out,
@@ -477,4 +488,8 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    logger = get_logger(__file__)
+    print("Running __main__...")
+    logger.info("info logging...")
+    logger.debug("debug logging...")
     main()

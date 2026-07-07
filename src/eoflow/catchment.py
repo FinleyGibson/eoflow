@@ -90,6 +90,7 @@ def _delineate_catchment_core(
 
     # Step 1: Fill pits in DEM
     if pit_fill:
+        logger.debug("Filling pits in DEM")
         pit_filled_dem = grid.fill_pits(dem, **_nodata_in_kw, **_nodata_out_kw)
 
         # Step 2: Fill depressions (multi-cell sinks larger than single pits)
@@ -108,6 +109,7 @@ def _delineate_catchment_core(
 
     # Step 3: Compute flow direction
     if routing.lower() == "d8":
+        logger.debug("Computing flow direction")
         fdir = grid.flowdir(
             inflated_dem,
             dirmap=dirmap,
@@ -118,6 +120,7 @@ def _delineate_catchment_core(
         raise ValueError(f"Unsupported routing method: {routing}. Use 'd8' or 'dinf'.")
 
     # Step 4: Compute flow accumulation
+    logger.debug("Computing flow accumulation")
     acc = grid.accumulation(
         fdir,
         dirmap=dirmap,
@@ -129,6 +132,7 @@ def _delineate_catchment_core(
     # Step 5: Snap pour point to nearest high-accumulation cell
     # This ensures the pour point is on a stream rather than a hillslope
     try:
+        logger.debug("Snapping pour point to nearest high-accumulation cell")
         x_snap, y_snap = grid.snap_to_mask(acc > flow_acc_threshold, (x, y), return_dist=False)
         snap_dist = ((x_snap - x) ** 2 + (y_snap - y) ** 2) ** 0.5
         logger.info(
@@ -147,6 +151,7 @@ def _delineate_catchment_core(
 
     # Retrieve the flow-accumulation value at the (snapped) pour point
     try:
+        logger.debug("Retrieving flow-accumulation value at pour point")
         col, row = grid.nearest_cell(x_snap, y_snap)
         # nearest_cell may return numpy scalars or 0-d arrays; use int() to be safe
         acc_val = np.array(acc)[int(row), int(col)]
@@ -159,6 +164,7 @@ def _delineate_catchment_core(
     # catchment() produces a boolean raster; use np.bool_(False) as nodata_out
     # so that pysheds' NEP-50-aware can_cast check succeeds.
     try:
+        logger.debug("Delineating catchment from pour point (%.6f, %.6f)", x_snap, y_snap)
         catch = grid.catchment(
             x=x_snap,
             y=y_snap,
@@ -174,6 +180,7 @@ def _delineate_catchment_core(
     # Step 7: Convert catchment raster to polygon
     # Extract the catchment boundary as a polygon
     try:
+        logger.debug("Converting catchment raster to polygon")
         # Get the shapes (polygons) from the catchment raster
         shapes_generator = grid.polygonize(catch.astype(np.int32))
 

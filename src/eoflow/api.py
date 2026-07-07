@@ -4,11 +4,10 @@ from typing import Dict, List, Optional
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from shapely.geometry import Point
 
 from eoflow.cs import CSDataAPI
 from eoflow.ea import EAWaterQualityAPI
-from eoflow.water_samples import Sample, get_water_quality_samples_for_point
+from eoflow.samples import Sample
 
 app = FastAPI(
     title="Water Quality API",
@@ -20,12 +19,8 @@ app = FastAPI(
 class PointRequest(BaseModel):
     """Request model for a geographic point"""
 
-    longitude: float = Field(
-        ..., description="Longitude coordinate", ge=-180, le=180
-    )
-    latitude: float = Field(
-        ..., description="Latitude coordinate", ge=-90, le=90
-    )
+    longitude: float = Field(..., description="Longitude coordinate", ge=-180, le=180)
+    latitude: float = Field(..., description="Latitude coordinate", ge=-90, le=90)
 
     class Config:
         json_schema_extra = {
@@ -62,20 +57,12 @@ class PolygonRequest(BaseModel):
 class EAWaterQualityRequest(BaseModel):
     """Request model for EA water quality data"""
 
-    polygon: PolygonRequest = Field(
-        ..., description="Polygon defining the area of interest"
-    )
-    determinand: str = Field(
-        ..., description="Determinand code (e.g., '0076' for temperature)"
-    )
+    polygon: PolygonRequest = Field(..., description="Polygon defining the area of interest")
+    determinand: str = Field(..., description="Determinand code (e.g., '0076' for temperature)")
     start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
     end_date: str = Field(..., description="End date in YYYY-MM-DD format")
-    area: str = Field(
-        ..., description="Precanned area code (e.g., 'environment_agency,SWX')"
-    )
-    verbose: bool = Field(
-        default=False, description="Whether to show verbose logging"
-    )
+    area: str = Field(..., description="Precanned area code (e.g., 'environment_agency,SWX')")
+    verbose: bool = Field(default=False, description="Whether to show verbose logging")
 
     class Config:
         json_schema_extra = {
@@ -101,20 +88,14 @@ class EAWaterQualityRequest(BaseModel):
 class EAMultipleDeterminandsRequest(BaseModel):
     """Request model for multiple EA determinands"""
 
-    polygon: PolygonRequest = Field(
-        ..., description="Polygon defining the area of interest"
-    )
+    polygon: PolygonRequest = Field(..., description="Polygon defining the area of interest")
     determinands: Dict[str, str] = Field(
         ..., description="Dictionary mapping determinand codes to column names"
     )
     start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
     end_date: str = Field(..., description="End date in YYYY-MM-DD format")
-    area: str = Field(
-        ..., description="Precanned area code (e.g., 'environment_agency,SWX')"
-    )
-    verbose: bool = Field(
-        default=False, description="Whether to show verbose logging"
-    )
+    area: str = Field(..., description="Precanned area code (e.g., 'environment_agency,SWX')")
+    verbose: bool = Field(default=False, description="Whether to show verbose logging")
 
     class Config:
         json_schema_extra = {
@@ -140,28 +121,14 @@ class EAMultipleDeterminandsRequest(BaseModel):
 class CSDataRequest(BaseModel):
     """Request model for CS (Citizen Scientist) data"""
 
-    polygon: PolygonRequest = Field(
-        ..., description="Polygon defining the area of interest"
-    )
+    polygon: PolygonRequest = Field(..., description="Polygon defining the area of interest")
     base_url: str = Field(..., description="ArcGIS FeatureServer base URL")
-    layer_id: int = Field(
-        default=0, description="Layer ID within the FeatureServer"
-    )
-    where: str = Field(
-        default="1=1", description="SQL WHERE clause for filtering"
-    )
-    start_date: Optional[str] = Field(
-        None, description="Start date in YYYY-MM-DD format"
-    )
-    end_date: Optional[str] = Field(
-        None, description="End date in YYYY-MM-DD format"
-    )
-    date_field: str = Field(
-        default="sample_date", description="Name of the date field"
-    )
-    verbose: bool = Field(
-        default=False, description="Whether to show verbose logging"
-    )
+    layer_id: int = Field(default=0, description="Layer ID within the FeatureServer")
+    where: str = Field(default="1=1", description="SQL WHERE clause for filtering")
+    start_date: Optional[str] = Field(None, description="Start date in YYYY-MM-DD format")
+    end_date: Optional[str] = Field(None, description="End date in YYYY-MM-DD format")
+    date_field: str = Field(default="sample_date", description="Name of the date field")
+    verbose: bool = Field(default=False, description="Whether to show verbose logging")
 
     class Config:
         json_schema_extra = {
@@ -189,32 +156,22 @@ class CSDataRequest(BaseModel):
 class CombinedWaterQualityRequest(BaseModel):
     """Request model for combined EA and CS data"""
 
-    polygon: PolygonRequest = Field(
-        ..., description="Polygon defining the area of interest"
-    )
+    polygon: PolygonRequest = Field(..., description="Polygon defining the area of interest")
 
     # EA parameters
-    ea_determinand: Optional[str] = Field(
-        None, description="EA determinand code (e.g., '0076')"
-    )
+    ea_determinand: Optional[str] = Field(None, description="EA determinand code (e.g., '0076')")
     ea_area: Optional[str] = Field(None, description="EA precanned area code")
 
     # CS parameters
-    cs_base_url: Optional[str] = Field(
-        None, description="CS ArcGIS FeatureServer base URL"
-    )
+    cs_base_url: Optional[str] = Field(None, description="CS ArcGIS FeatureServer base URL")
     cs_layer_id: int = Field(default=0, description="CS layer ID")
     cs_where: str = Field(default="1=1", description="CS WHERE clause")
-    cs_date_field: str = Field(
-        default="sample_date", description="CS date field name"
-    )
+    cs_date_field: str = Field(default="sample_date", description="CS date field name")
 
     # Common parameters
     start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
     end_date: str = Field(..., description="End date in YYYY-MM-DD format")
-    verbose: bool = Field(
-        default=False, description="Whether to show verbose logging"
-    )
+    verbose: bool = Field(default=False, description="Whether to show verbose logging")
 
     class Config:
         json_schema_extra = {
@@ -332,45 +289,6 @@ async def root():
     }
 
 
-@app.post("/samples", response_model=List[SampleResponse])
-async def get_samples(point: PointRequest):
-    """
-    Get water quality samples for a given geographic point.
-
-    Args:
-        point: A PointRequest containing longitude and latitude coordinates
-
-    Returns:
-        A list of water quality samples for the catchment area containing the point
-
-    Raises:
-        HTTPException: If there's an error processing the request
-    """
-    try:
-        # Create a shapely Point from the request coordinates
-        shapely_point = Point(point.longitude, point.latitude)
-
-        # Get samples for the point
-        samples = get_water_quality_samples_for_point(shapely_point)
-
-        # Convert Sample objects to response models
-        response_samples = [sample_to_response(sample) for sample in samples]
-
-        return response_samples
-
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=501,
-            detail="The water quality sampling functionality is not yet fully implemented. "
-            "Please ensure get_catchment_form_point and get_water_quality_samples_for_poly are implemented.",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"An error occurred while processing your request: {str(e)}",
-        )
-
-
 @app.post("/ea/water-quality")
 async def get_ea_water_quality(request: EAWaterQualityRequest):
     """
@@ -394,9 +312,7 @@ async def get_ea_water_quality(request: EAWaterQualityRequest):
     """
     try:
         # Convert polygon coordinates to list of tuples
-        polygon_coords = [
-            (coord[0], coord[1]) for coord in request.polygon.coordinates
-        ]
+        polygon_coords = [(coord[0], coord[1]) for coord in request.polygon.coordinates]
 
         # Initialize EA API client
         api = EAWaterQualityAPI()
@@ -433,13 +349,9 @@ async def get_ea_water_quality(request: EAWaterQualityRequest):
         }
 
     except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid request parameters: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid request parameters: {str(e)}")
     except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail=f"Missing required dependency: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Missing required dependency: {str(e)}")
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -471,9 +383,7 @@ async def get_ea_water_quality_multiple(request: EAMultipleDeterminandsRequest):
     """
     try:
         # Convert polygon coordinates to list of tuples
-        polygon_coords = [
-            (coord[0], coord[1]) for coord in request.polygon.coordinates
-        ]
+        polygon_coords = [(coord[0], coord[1]) for coord in request.polygon.coordinates]
 
         # Initialize EA API client
         api = EAWaterQualityAPI()
@@ -512,13 +422,9 @@ async def get_ea_water_quality_multiple(request: EAMultipleDeterminandsRequest):
         }
 
     except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid request parameters: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid request parameters: {str(e)}")
     except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail=f"Missing required dependency: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Missing required dependency: {str(e)}")
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -550,9 +456,7 @@ async def get_cs_water_quality(request: CSDataRequest):
     """
     try:
         # Convert polygon coordinates to list of tuples
-        polygon_coords = [
-            (coord[0], coord[1]) for coord in request.polygon.coordinates
-        ]
+        polygon_coords = [(coord[0], coord[1]) for coord in request.polygon.coordinates]
 
         # Initialize CS API client
         api = CSDataAPI(base_url=request.base_url, layer_id=request.layer_id)
@@ -595,13 +499,9 @@ async def get_cs_water_quality(request: CSDataRequest):
         }
 
     except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid request parameters: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid request parameters: {str(e)}")
     except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail=f"Missing required dependency: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Missing required dependency: {str(e)}")
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -633,9 +533,7 @@ async def get_combined_water_quality(request: CombinedWaterQualityRequest):
     """
     try:
         # Convert polygon coordinates to list of tuples
-        polygon_coords = [
-            (coord[0], coord[1]) for coord in request.polygon.coordinates
-        ]
+        polygon_coords = [(coord[0], coord[1]) for coord in request.polygon.coordinates]
 
         combined_data = []
         ea_count = 0
@@ -656,9 +554,7 @@ async def get_combined_water_quality(request: CombinedWaterQualityRequest):
 
                 if not ea_df.empty:
                     # Filter by polygon
-                    ea_filtered = ea_api.filter_by_polygon(
-                        ea_df, polygon_coords
-                    )
+                    ea_filtered = ea_api.filter_by_polygon(ea_df, polygon_coords)
 
                     if not ea_filtered.empty:
                         # Add data source column
@@ -672,9 +568,7 @@ async def get_combined_water_quality(request: CombinedWaterQualityRequest):
         # Fetch CS data if parameters provided
         if request.cs_base_url:
             try:
-                cs_api = CSDataAPI(
-                    base_url=request.cs_base_url, layer_id=request.cs_layer_id
-                )
+                cs_api = CSDataAPI(base_url=request.cs_base_url, layer_id=request.cs_layer_id)
                 cs_df = cs_api.get_data(
                     where=request.cs_where,
                     start_date=request.start_date,
@@ -685,9 +579,7 @@ async def get_combined_water_quality(request: CombinedWaterQualityRequest):
 
                 if not cs_df.empty:
                     # Filter by polygon
-                    cs_filtered = cs_api.filter_by_polygon(
-                        cs_df, polygon_coords
-                    )
+                    cs_filtered = cs_api.filter_by_polygon(cs_df, polygon_coords)
 
                     if not cs_filtered.empty:
                         # Add data source column
@@ -723,13 +615,9 @@ async def get_combined_water_quality(request: CombinedWaterQualityRequest):
         return response
 
     except ValueError as e:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid request parameters: {str(e)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid request parameters: {str(e)}")
     except ImportError as e:
-        raise HTTPException(
-            status_code=500, detail=f"Missing required dependency: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Missing required dependency: {str(e)}")
     except Exception as e:
         raise HTTPException(
             status_code=500,

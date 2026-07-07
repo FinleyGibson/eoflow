@@ -13,7 +13,3 @@ class TestOpenEOAPIInit:
 
     def test_connection(self):
         api = eo.connect()
-
-        result = api.authenticate_bearer_token()
-        a = 1
-        print(api)

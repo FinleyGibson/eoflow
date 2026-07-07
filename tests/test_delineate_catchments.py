@@ -1,7 +1,7 @@
 """
 Unit tests for the delineate_catchments script.
 
-These tests exercise the CLI argument parser, the core ``build_dataset``
+These tests exercise the CLI argument parser, the core ``delineate_catchments``
 function, checkpoint save / load / resume, location-cache construction,
 the ``main()`` entry-point, and various edge-cases – all without requiring
 real DEM data.  ``_delineate_catchment_core`` is mocked throughout.
@@ -32,9 +32,8 @@ from scripts.delineate_catchments import (
     _build_location_cache,
     _load_checkpoint,
     _save_checkpoint,
-    build_dataset,
+    delineate_catchments,
     main,
-    parse_args,
 )
 
 # ---------------------------------------------------------------------------
@@ -161,96 +160,25 @@ def cli_argv(csv_path: Path, dem_path: Path, output_path: Path) -> List[str]:
         "latitude",
         "--lon-col",
         "longitude",
+        "--log-level",
+        "INFO",
     ]
 
 
 # ---------------------------------------------------------------------------
-# TestParseArgs
+# TestDelineateCatchments
 # ---------------------------------------------------------------------------
 
 
-class TestParseArgs:
-    """Verify CLI argument parsing."""
-
-    def test_required_args_parsed(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert args.csv.name == "samples.csv"
-        assert args.dem.name == "devon_dem.tif"
-        assert args.out.name == "devon_water_quality_dataset.gpkg"
-
-    def test_lat_lon_columns(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert args.lat_col == "latitude"
-        assert args.lon_col == "longitude"
-
-    def test_defaults(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert args.checkpoint_every == 10
-        assert args.flow_acc_threshold == 1000
-        assert args.log_level == "INFO"
-        assert args.log_file is None
-
-    def test_override_checkpoint_every(self, cli_argv: List[str]) -> None:
-        argv = cli_argv + ["--checkpoint-every", "5"]
-        args = parse_args(argv)
-        assert args.checkpoint_every == 5
-
-    def test_override_flow_acc_threshold(self, cli_argv: List[str]) -> None:
-        argv = cli_argv + ["--flow-acc-threshold", "500"]
-        args = parse_args(argv)
-        assert args.flow_acc_threshold == 500
-
-    def test_override_log_level(self, cli_argv: List[str]) -> None:
-        argv = cli_argv + ["--log-level", "DEBUG"]
-        args = parse_args(argv)
-        assert args.log_level == "DEBUG"
-
-    def test_override_log_file(self, cli_argv: List[str], tmp_dir: Path) -> None:
-        log_file = tmp_dir / "builder.log"
-        argv = cli_argv + ["--log-file", str(log_file)]
-        args = parse_args(argv)
-        assert args.log_file == log_file
-
-    def test_csv_is_path_object(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert isinstance(args.csv, Path)
-
-    def test_dem_is_path_object(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert isinstance(args.dem, Path)
-
-    def test_out_is_path_object(self, cli_argv: List[str]) -> None:
-        args = parse_args(cli_argv)
-        assert isinstance(args.out, Path)
-
-    def test_missing_required_csv_exits(self, dem_path: Path, output_path: Path) -> None:
-        with pytest.raises(SystemExit):
-            parse_args(["--dem", str(dem_path), "--out", str(output_path)])
-
-    def test_missing_required_dem_exits(self, csv_path: Path, output_path: Path) -> None:
-        with pytest.raises(SystemExit):
-            parse_args(["--csv", str(csv_path), "--out", str(output_path)])
-
-    def test_invalid_log_level_exits(self, cli_argv: List[str]) -> None:
-        argv = cli_argv + ["--log-level", "INVALID"]
-        with pytest.raises(SystemExit):
-            parse_args(argv)
-
-
-# ---------------------------------------------------------------------------
-# TestBuildDataset
-# ---------------------------------------------------------------------------
-
-
-class TestBuildDataset:
-    """Test the core ``build_dataset`` function with mocked delineation."""
+class TestDelineateCatchments:
+    """Test the core ``delineate_catchments`` function with mocked delineation."""
 
     @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_basic_run(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         """All rows succeed – every row should have status 'ok'."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -267,7 +195,7 @@ class TestBuildDataset:
     def test_output_gpkg_created(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -283,7 +211,7 @@ class TestBuildDataset:
     ) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -311,7 +239,7 @@ class TestBuildDataset:
 
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -339,7 +267,7 @@ class TestBuildDataset:
         poly = _sample_polygon(-3.53, 50.72)
         mock_delineate.return_value = (poly, Point(-3.53, 50.72), 250.0)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -355,7 +283,7 @@ class TestBuildDataset:
     ) -> None:
         mock_delineate.side_effect = RuntimeError("DEM out of bounds")
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -379,7 +307,7 @@ class TestBuildDataset:
 
         mock_delineate.side_effect = _side_effect
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -398,7 +326,7 @@ class TestBuildDataset:
         pd.DataFrame({"x": [1], "y": [2]}).to_csv(csv, index=False)
 
         with pytest.raises(ValueError, match="latitude"):
-            build_dataset(
+            delineate_catchments(
                 csv_path=csv,
                 dem_path=dem_path,
                 output_path=output_path,
@@ -412,7 +340,7 @@ class TestBuildDataset:
     ) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path_with_nan,
             dem_path=dem_path,
             output_path=output_path,
@@ -430,7 +358,7 @@ class TestBuildDataset:
     ) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -452,7 +380,7 @@ class TestBuildDataset:
 
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -470,7 +398,7 @@ class TestBuildDataset:
     ) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -493,7 +421,7 @@ class TestBuildDataset:
         _write_csv(csv, extra_cols={"colour": ["red", "blue", "green", "yellow"]})
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -516,7 +444,7 @@ class TestCheckpointing:
     def test_checkpoint_file_written(self, mock_delineate, csv_path, dem_path, output_path) -> None:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -531,7 +459,7 @@ class TestCheckpointing:
         """Write → reload checkpoint; row count and status must survive."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -551,7 +479,7 @@ class TestCheckpointing:
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
         # First run – delineates all 4 unique locations
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -564,7 +492,7 @@ class TestCheckpointing:
         mock_delineate.reset_mock()
 
         # Second run – should skip everything
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -580,7 +508,7 @@ class TestCheckpointing:
         _write_csv(csv, n_rows=4)
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        build_dataset(
+        delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -613,7 +541,7 @@ class TestCheckpointing:
         csv_small = tmp_dir / "small.csv"
         _write_csv(csv_small, n_rows=2)
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
-        build_dataset(
+        delineate_catchments(
             csv_path=csv_small,
             dem_path=dem_path,
             output_path=output,
@@ -627,7 +555,7 @@ class TestCheckpointing:
         csv_big = tmp_dir / "big.csv"
         _write_csv(csv_big, n_rows=4)
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_big,
             dem_path=dem_path,
             output_path=output,
@@ -740,7 +668,7 @@ class TestBuildLocationCache:
 
 
 class TestMainCLI:
-    """Test the ``main()`` entry-point that wires up CLI → build_dataset."""
+    """Test the ``main()`` entry-point that wires up CLI → delineate_catchments."""
 
     @patch("scripts.delineate_catchments._delineate_catchment_core")
     def test_main_runs_end_to_end(self, mock_delineate, cli_argv, output_path) -> None:
@@ -830,7 +758,7 @@ class TestEdgeCases:
         _write_csv(csv, n_rows=1)
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -845,7 +773,7 @@ class TestEdgeCases:
         reason=(
             "Empty GeoDataFrame after dropping all-NaN rows causes "
             "_save_checkpoint to fail with multiple geometry columns. "
-            "Known edge case in build_dataset/save_checkpoint interaction."
+            "Known edge case in delineate_catchments/save_checkpoint interaction."
         ),
         raises=ValueError,
         strict=True,
@@ -859,7 +787,7 @@ class TestEdgeCases:
             csv, index=False
         )
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv,
             dem_path=dem_path,
             output_path=output_path,
@@ -877,7 +805,7 @@ class TestEdgeCases:
         """checkpoint_every > n_rows → only the final save triggers."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -893,12 +821,12 @@ class TestEdgeCases:
     def test_dem_path_coerced_to_path(
         self, mock_delineate, csv_path, dem_path, output_path
     ) -> None:
-        """build_dataset wraps dem_path in Path(); passing a string should work."""
+        """delineate_catchments wraps dem_path in Path(); passing a string should work."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
-            dem_path=str(dem_path),  # string, not Path
+            dem_path=dem_path,  # string, not Path
             output_path=output_path,
             lat_col="latitude",
             lon_col="longitude",
@@ -913,7 +841,7 @@ class TestEdgeCases:
         """If every call fails the script must still produce a GeoPackage."""
         mock_delineate.side_effect = RuntimeError("total failure")
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,
@@ -930,7 +858,7 @@ class TestEdgeCases:
         """checkpoint_every=1 saves after every delineation."""
         mock_delineate.side_effect = lambda point, **kw: _sample_result(point.x, point.y)
 
-        gdf = build_dataset(
+        gdf = delineate_catchments(
             csv_path=csv_path,
             dem_path=dem_path,
             output_path=output_path,

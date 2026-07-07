@@ -288,9 +288,7 @@ class TestCombinedWaterQualityEndpoint:
 
             # Check data has source tags
             assert len(json_response["data"]) == 4
-            sources = [
-                record["data_source"] for record in json_response["data"]
-            ]
+            sources = [record["data_source"] for record in json_response["data"]]
             assert sources.count("EA") == 2
             assert sources.count("CS") == 2
 
@@ -506,9 +504,7 @@ class TestCombinedWaterQualityEndpoint:
             mock_cs = Mock()
             mock_cs_class.return_value = mock_cs
             mock_cs.get_data.return_value = pd.DataFrame({"objectid": [1]})
-            mock_cs.filter_by_polygon.return_value = pd.DataFrame(
-                {"objectid": [1]}
-            )
+            mock_cs.filter_by_polygon.return_value = pd.DataFrame({"objectid": [1]})
 
             response = client.post("/combined/water-quality", json=request_data)
 
@@ -579,9 +575,7 @@ class TestErrorHandling:
             mock_api = Mock()
             mock_api_class.return_value = mock_api
             mock_api.get_data.return_value = pd.DataFrame({"id": [1]})
-            mock_api.filter_by_polygon.side_effect = ImportError(
-                "shapely is required"
-            )
+            mock_api.filter_by_polygon.side_effect = ImportError("shapely is required")
 
             response = client.post("/cs/water-quality", json=request_data)
 

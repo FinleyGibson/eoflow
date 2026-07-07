@@ -104,8 +104,8 @@ UK_BNG_EXTENT = (0.0, 0.0, 700_000.0, 1_300_000.0)
 ALL_RUN_HOURS: list[int] = sorted(range(24))
 
 # Silence iris deprecation/future warnings for the whole process.
-iris.FUTURE.save_split_attrs = True
-iris.FUTURE.date_microseconds = True
+# iris.FUTURE.save_split_attrs = True
+# iris.FUTURE.date_microseconds = True
 
 # HDF5 (the backend for NetCDF4) is not thread-safe by default.
 # Serialise all iris.save() calls with this lock so concurrent worker

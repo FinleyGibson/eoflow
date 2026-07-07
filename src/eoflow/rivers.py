@@ -99,17 +99,46 @@ from __future__ import annotations
 
 import logging
 import time
+from random import uniform
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import geopandas as gpd
 import networkx as nx
 import pandas as pd
 import requests
-from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry import shape as shapely_shape
-from shapely.ops import linemerge
+from shapely.ops import linemerge, substring
+
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    # NOTE: "https://overpass.osm.ch/api/interpreter" was previously listed
+    # here as a fallback, but it responds 200 OK with an *empty* result set
+    # for queries that unambiguously have matching data (verified against a
+    # known river bbox). Because that looks like a legitimate success to
+    # `_fetch_overpass`, it silently masked real data whenever the primary
+    # endpoint hit a transient error and retries rotated onto it. Prefer
+    # relying on retries against the authoritative overpass-api.de instance
+    # instead of resurrecting that mirror as a fallback.
+]
+WATERWAY_VALUES = "river|stream|canal|drain|riverbank|ditch|brook"
+
+# Overpass instances (notably overpass-api.de) reject requests that don't send
+# a descriptive User-Agent, responding with "406 Not Acceptable" instead of
+# serving the query. Always identify ourselves to avoid this.
+_REQUEST_HEADERS = {
+    "User-Agent": "eoflow-rivers/1.0 (+https://github.com/eoflow; contact: eoflow@example.com)"
+}
+
 
 logger = logging.getLogger(__name__)
+
+
+from requests.exceptions import ConnectionError, RequestException, Timeout
+
+
+class OverpassError(Exception):
+    pass
 
 
 def _make_overpass_poly(geom: Union[Polygon, MultiPolygon]) -> str:
@@ -140,7 +169,7 @@ def _make_overpass_poly(geom: Union[Polygon, MultiPolygon]) -> str:
     return " ; ".join(polys)
 
 
-def _build_overpass_query(
+def _build_overpass_query_from_poly_str(
     poly_str: str, waterway_values: str = "river|stream|canal|drain|riverbank"
 ) -> str:
     """
@@ -160,9 +189,7 @@ def _build_overpass_query(
 (._;>;);
 out body;"""
 
-    logger.debug(
-        "Built Overpass query with poly containing %d characters", len(poly_str)
-    )
+    logger.debug("Built Overpass query with poly containing %d characters", len(poly_str))
     return query
 
 
@@ -190,10 +217,6 @@ out body;"""
     return query
 
 
-class OverpassError(RuntimeError):
-    """Raised when Overpass API queries fail after retries."""
-
-
 def _fetch_overpass(
     query: str,
     endpoints: Iterable[str],
@@ -201,113 +224,148 @@ def _fetch_overpass(
     max_retries: int = 6,
     backoff_factor: float = 1.5,
 ) -> Dict[str, Any]:
-    """
-    Execute the Overpass QL `query` against one of the provided `endpoints`,
-    rotating and retrying on transient failures.
 
-    Returns the parsed JSON response on success or raises OverpassError.
-    """
     endpoint_list = list(endpoints)
     if not endpoint_list:
         raise ValueError("At least one Overpass endpoint must be provided")
 
     last_exc: Optional[Exception] = None
-    attempt = 0
     n_endpoints = len(endpoint_list)
 
-    while attempt < max_retries:
+    for attempt in range(max_retries):
         endpoint = endpoint_list[attempt % n_endpoints]
+
         try:
             logger.debug(
-                "Posting Overpass query attempt=%s/%s endpoint=%s",
+                "Overpass request attempt=%s/%s endpoint=%s",
                 attempt + 1,
                 max_retries,
                 endpoint,
             )
-            resp = requests.post(endpoint, data={"data": query}, timeout=timeout)
-            # Raise for HTTP errors
-            try:
-                resp.raise_for_status()
-            except requests.HTTPError as http_err:
-                status = getattr(resp, "status_code", None)
-                # Treat server errors as transient
-                if status and 500 <= status < 600:
-                    last_exc = http_err
-                    logger.warning(
-                        "Overpass server error %s from %s; retrying (attempt %s/%s)",
-                        status,
-                        endpoint,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    time.sleep(backoff_factor**attempt)
-                    attempt += 1
-                    continue
-                # Client errors cannot be retried
-                raise OverpassError(f"Overpass HTTP error from {endpoint}: {http_err}")
 
-            # Try to parse JSON
+            resp = requests.post(
+                endpoint,
+                data={"data": query},
+                timeout=timeout,
+                headers=_REQUEST_HEADERS,
+            )
+
+            # Handle HTTP-level errors explicitly
+            if resp.status_code == 400:
+                # Bad query → do NOT retry
+                raise OverpassError(f"Bad Overpass query (400). Response: {resp.text[:500]}")
+
+            if resp.status_code in (429, 500, 502, 503, 504):
+                # Retryable server-side errors
+                raise OverpassError(f"Retryable HTTP error {resp.status_code}")
+
+            resp.raise_for_status()
+
             try:
-                data = resp.json()
+                return resp.json()
             except ValueError as exc:
-                # Log response text for debugging
-                resp_text = resp.text[:500] if resp.text else "(empty response)"
-                logger.error(
-                    "Failed to parse JSON from %s. Response: %s", endpoint, resp_text
-                )
-                # If response is empty or looks like HTML error, treat as transient
-                if not resp.text or resp.text.strip().startswith("<"):
-                    last_exc = exc
-                    logger.warning(
-                        "Empty or HTML response from %s, treating as transient; retrying (attempt %s/%s)",
-                        endpoint,
-                        attempt + 1,
-                        max_retries,
-                    )
-                    time.sleep(backoff_factor**attempt)
-                    attempt += 1
-                    continue
+                # JSON decode failed → likely Overpass HTML error or empty response
                 raise OverpassError(
-                    f"Invalid JSON from Overpass at {endpoint}: {exc}. Response: {resp_text}"
-                )
+                    f"Invalid JSON response from Overpass. First 300 chars:\n{resp.text[:300]}"
+                ) from exc
 
-            return data
-
-        except (requests.Timeout, requests.ConnectionError) as exc:
+        except (Timeout, ConnectionError) as exc:
             last_exc = exc
             logger.warning(
-                "Overpass connection/timeout error from %s: %s (attempt %s/%s)",
+                "Network error from %s: %s (attempt %s/%s)",
                 endpoint,
                 exc,
                 attempt + 1,
                 max_retries,
             )
-            time.sleep(backoff_factor**attempt)
-            attempt += 1
-            continue
-        except OverpassError:
-            # Re-raise our own errors immediately
-            raise
-        except Exception as exc:
-            # Unexpected exception - capture and retry a limited number of times
+
+        except OverpassError as exc:
             last_exc = exc
-            logger.exception(
-                "Unexpected error contacting Overpass at %s: %s", endpoint, exc
+            logger.warning(
+                "Overpass error: %s (attempt %s/%s)",
+                exc,
+                attempt + 1,
+                max_retries,
             )
-            time.sleep(backoff_factor**attempt)
-            attempt += 1
-            continue
+
+        except RequestException as exc:
+            last_exc = exc
+            logger.exception("Unexpected requests error: %s", exc)
+
+        # Backoff + jitter
+        sleep_time = (backoff_factor**attempt) + uniform(0, 0.3)
+        time.sleep(sleep_time)
 
     raise OverpassError(
         f"Failed to contact Overpass after {max_retries} attempts. Last error: {last_exc}"
     )
 
 
+# def _fetch_overpass(
+#     query: str,
+#     endpoints: Iterable[str],
+#     timeout: int = 180,
+#     max_retries: int = 6,
+#     backoff_factor: float = 1.5,
+# ) -> Dict[str, Any]:
+#     """
+#     Execute the Overpass QL `query` against one of the provided `endpoints`,
+#     rotating and retrying on transient failures.
+
+#     Returns the parsed JSON response on success or raises OverpassError.
+#     """
+#     endpoint_list = list(endpoints)
+#     if not endpoint_list:
+#         raise ValueError("At least one Overpass endpoint must be provided")
+
+#     last_exc: Optional[Exception] = None
+#     attempt = 0
+#     n_endpoints = len(endpoint_list)
+
+#     while attempt < max_retries:
+#         endpoint = endpoint_list[attempt % n_endpoints]
+#         try:
+#             logger.debug(
+#                 "Posting Overpass query attempt=%s/%s endpoint=%s",
+#                 attempt + 1,
+#                 max_retries,
+#                 endpoint,
+#             )
+#             resp = requests.post(endpoint, data={"data": query}, timeout=timeout)
+#             data = resp.json()
+#             return data
+
+#         except (requests.Timeout, requests.ConnectionError) as exc:
+#             last_exc = exc
+#             logger.warning(
+#                 "Overpass connection/timeout error from %s: %s (attempt %s/%s)",
+#                 endpoint,
+#                 exc,
+#                 attempt + 1,
+#                 max_retries,
+#             )
+#             time.sleep(backoff_factor**attempt)
+#             attempt += 1
+#             continue
+#         except OverpassError:
+#             # Re-raise our own errors immediately
+#             raise
+#         except Exception as exc:
+#             # Unexpected exception - capture and retry a limited number of times
+#             last_exc = exc
+#             logger.exception("Unexpected error contacting Overpass at %s: %s", endpoint, exc)
+#             time.sleep(backoff_factor**attempt)
+#             attempt += 1
+#             continue
+
+#     raise OverpassError(
+#         f"Failed to contact Overpass after {max_retries} attempts. Last error: {last_exc}"
+#     )
+
+
 def _aggregate_osm_elements(
     elements: List[Dict[str, Any]],
-) -> Tuple[
-    Dict[int, Tuple[float, float]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]
-]:
+) -> Tuple[Dict[int, Tuple[float, float]], Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
     """
     Parse Overpass API response and aggregate elements into nodes, ways, and relations.
 
@@ -521,17 +579,16 @@ def _build_osm_node_graph(
                 G[u][v]["ways"] = ways_list
             else:
                 seg_length = edge_geom.length
-                G.add_edge(
-                    u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length
-                )
+                G.add_edge(u, v, way_id=way_id, tags=w.get("tags", {}), length=seg_length)
 
     return G
 
 
-def get_river_network_from_shape(
+def get_river_network_from_poly(
     shp: Union[dict, Polygon, MultiPolygon],
-    overpass_endpoints: Optional[Iterable[str]] = None,
+    overpass_endpoints: Iterable[str] = OVERPASS_ENDPOINTS,
     timeout: int = 180,
+    waterway_values: str = WATERWAY_VALUES,
     return_graph: bool = False,
     simplify_multiline: bool = True,
     max_retries: int = 6,
@@ -544,6 +601,7 @@ def get_river_network_from_shape(
     Parameters
     - shp: a Shapely Polygon/MultiPolygon or a GeoJSON-like dict (will be converted via shapely.shape).
     - overpass_endpoints: list/iterable of Overpass API endpoints to try. If None, a default list is used.
+    - waterway_values: a string of OSM waterway values to filter by (default: "river|stream|canal|drain|riverbank|ditch|brook").
     - timeout: request timeout in seconds for each HTTP request.
     - return_graph: if True also return a NetworkX graph (nodes with 'x','y' attrs and edges with way id, tags).
     - simplify_multiline: if True, merge contiguous segments of a relation into one LineString where possible.
@@ -569,15 +627,6 @@ def get_river_network_from_shape(
             "The provided shape must be a Polygon or MultiPolygon (or GeoJSON mapping)."
         )
 
-    if overpass_endpoints is None:
-        overpass_endpoints = [
-            "https://overpass-api.de/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter",
-            "https://overpass.openstreetmap.ru/api/interpreter",
-        ]
-
-    waterway_values = "river|stream|canal|drain|riverbank|ditch|brook"
-
     # Choose query method: bbox is more robust, poly is more precise
     if use_bbox:
         # Use bounding box query
@@ -592,7 +641,7 @@ def get_river_network_from_shape(
             raise ValueError(f"Failed to convert shape to Overpass poly format: {e}")
 
         try:
-            query = _build_overpass_query(poly_str, waterway_values=waterway_values)
+            query = _build_overpass_query_from_poly_str(poly_str, waterway_values=waterway_values)
         except ValueError as e:
             raise ValueError(f"Failed to build Overpass query: {e}")
 
@@ -618,9 +667,7 @@ def get_river_network_from_shape(
     rows: List[Dict[str, Any]] = []
     rows.extend(_convert_ways_to_rows(ways, nodes))
     rows.extend(
-        _convert_relations_to_rows(
-            relations, ways, nodes, simplify_multiline=simplify_multiline
-        )
+        _convert_relations_to_rows(relations, ways, nodes, simplify_multiline=simplify_multiline)
     )
 
     # Build GeoDataFrame
@@ -631,6 +678,7 @@ def get_river_network_from_shape(
                 "osm_id": [],
                 "osm_type": [],
                 "tags": [],
+                "geometry": [],
             },
             geometry="geometry",
             crs="EPSG:4326",
@@ -652,9 +700,7 @@ def get_river_network_from_shape(
 
     if return_graph:
         nxg = (
-            _build_osm_node_graph(gdf, nodes, ways, geom)
-            if not (gdf.shape[0] == 0)
-            else nx.Graph()
+            _build_osm_node_graph(gdf, nodes, ways, geom) if not (gdf.shape[0] == 0) else nx.Graph()
         )
         return gdf, nxg
     else:
@@ -819,7 +865,7 @@ def build_river_network_graph(
 
     # Step 2: Find intersections between lines
     # This is computationally expensive for large datasets, so we use spatial index
-    s_index = line_gdf.s_index
+    s_index = line_gdf.sindex
 
     for idx, row in line_gdf.iterrows():
         geom = row.geometry
@@ -909,43 +955,57 @@ def build_river_network_graph(
         G.add_node(node_id, x=coord[0], y=coord[1])
         return node_id
 
-    # Process each line and split at nodes
+    # Process each line and split at nodes.
+    #
+    # Rather than only splitting where a node coordinate happens to already
+    # be a vertex of the line's coordinate sequence, project every known
+    # node onto the line and split at its along-line distance. This
+    # correctly handles intersections that occur strictly between two
+    # vertices (e.g. two lines crossing in an "X" shape), not just at
+    # shared vertices.
     for orig_idx, row in line_gdf.iterrows():
         geom = row.geometry
         if not geom or geom.is_empty:
             continue
 
-        coords = list(geom.coords)
-        if len(coords) < 2:
+        line_length = geom.length
+        if line_length == 0:
             continue
 
-        # Find all nodes along this line
-        nodes_on_line = []
+        start_node = find_node_id(geom.coords[0])
+        end_node = find_node_id(geom.coords[-1])
 
-        # Always include endpoints
-        start_node = find_node_id(coords[0])
-        end_node = find_node_id(coords[-1])
-        nodes_on_line.append((0, start_node, coords[0]))
+        # Find every known node that lies on (or very near) this line, and
+        # record how far along the line it sits.
+        node_distance_along_line = {start_node: 0.0, end_node: line_length}
+        for node_id, coord in nodes_data.items():
+            if node_id in node_distance_along_line:
+                continue
+            pt = Point(coord)
+            if geom.distance(pt) <= tolerance:
+                node_distance_along_line[node_id] = geom.project(pt)
 
-        # Check each coordinate to see if it's a node
-        for i, coord in enumerate(coords[1:-1], start=1):
-            if coord in node_id_map:
-                node_id = node_id_map[coord]
-                nodes_on_line.append((i, node_id, coord))
+        # Order nodes by distance along the line, collapsing any that fall
+        # within `tolerance` of the previous one (e.g. floating point noise
+        # or coincident endpoints).
+        ordered_nodes = sorted(node_distance_along_line.items(), key=lambda kv: kv[1])
+        collapsed_nodes = [ordered_nodes[0]]
+        for node_id, dist in ordered_nodes[1:]:
+            if dist - collapsed_nodes[-1][1] <= tolerance:
+                continue
+            collapsed_nodes.append((node_id, dist))
 
-        nodes_on_line.append((len(coords) - 1, end_node, coords[-1]))
-
-        # Create edges between consecutive nodes on this line
-        for i in range(len(nodes_on_line) - 1):
-            idx1, node1, _ = nodes_on_line[i]
-            idx2, node2, _ = nodes_on_line[i + 1]
+        # Create edges between consecutive nodes along this line
+        for i in range(len(collapsed_nodes) - 1):
+            node1, dist1 = collapsed_nodes[i]
+            node2, dist2 = collapsed_nodes[i + 1]
 
             if node1 == node2:
                 continue
 
-            # Extract segment coordinates
-            segment_coords = coords[idx1 : idx2 + 1]
-            segment_geom = LineString(segment_coords)
+            segment_geom = substring(geom, dist1, dist2)
+            if segment_geom.is_empty or segment_geom.length == 0:
+                continue
             segment_length = segment_geom.length
 
             # Add edge (or update if already exists with shorter path)
@@ -966,9 +1026,7 @@ def build_river_network_graph(
                     },
                 )
 
-    logger.info(
-        f"Built graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges"
-    )
+    logger.info(f"Built graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
 
     return G
 
@@ -1040,9 +1098,7 @@ def calculate_shortest_path_length(
     try:
         path = nx.shortest_path(G, source_node, target_node, weight="length")
     except nx.NetworkXNoPath:
-        raise nx.NetworkXNoPath(
-            f"No path exists between nodes {source_node} and {target_node}"
-        )
+        raise nx.NetworkXNoPath(f"No path exists between nodes {source_node} and {target_node}")
 
     # Check if CRS is geographic
     is_geographic = False
