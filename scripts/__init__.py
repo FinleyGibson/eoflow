@@ -7,6 +7,8 @@ __all__ = [
     "get_ea_water_quality",
     "ge_ea_water_quality_by_shapefile",
     "convert_ea_csv",
+    # Earth observation (openEO) data
+    "get_eo_data_by_shapefile",
     # DEM
     "get_dem",
     # Catchment delineation
