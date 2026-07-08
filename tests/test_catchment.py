@@ -453,10 +453,11 @@ class TestDelineateCatchmentWorkflow:
         assert call_kwargs["x"] == sample_point.x
         assert call_kwargs["y"] == sample_point.y
 
+    @patch("eoflow.catchment.View")
     @patch("eoflow.catchment.Grid")
     @patch("eoflow.catchment.shape")
     def test_snapped_coordinates_passed_to_catchment(
-        self, mock_shape, mock_grid_class, sample_point, mock_dem_path, sample_polygon
+        self, mock_shape, mock_grid_class, mock_view, sample_point, mock_dem_path, sample_polygon
     ):
         """Test that snapped coordinates (not originals) are passed to grid.catchment."""
         mock_dem_path.touch()
@@ -472,9 +473,11 @@ class TestDelineateCatchmentWorkflow:
         mock_grid.flowdir.return_value = np.ones((10, 10))
         mock_grid.accumulation.return_value = np.random.randint(0, 5000, (10, 10))
 
-        # Snap moves the point to a different location
+        # Snap moves the point to a different location. Snapping is performed
+        # via ``View.snap_to_mask`` directly (not ``grid.snap_to_mask``) to
+        # avoid a NumPy 2.x incompatibility in pysheds' Grid.snap_to_mask.
         snapped_x, snapped_y = -3.45, 50.72
-        mock_grid.snap_to_mask.return_value = (snapped_x, snapped_y)
+        mock_view.snap_to_mask.return_value = (snapped_x, snapped_y)
 
         catch_data = np.zeros((10, 10), dtype=np.int32)
         catch_data[4:7, 4:7] = 1
@@ -623,10 +626,11 @@ class TestDelineateCatchmentWorkflow:
 
         assert mock_grid.accumulation.call_args[1]["apply_input_mask"] is True
 
+    @patch("eoflow.catchment.View")
     @patch("eoflow.catchment.Grid")
     @patch("eoflow.catchment.shape")
     def test_flow_acc_threshold_used_in_snap(
-        self, mock_shape, mock_grid_class, sample_point, mock_dem_path, sample_polygon
+        self, mock_shape, mock_grid_class, mock_view, sample_point, mock_dem_path, sample_polygon
     ):
         """Test that flow_acc_threshold controls the mask used for snapping."""
         mock_dem_path.touch()
@@ -645,7 +649,10 @@ class TestDelineateCatchmentWorkflow:
         acc_data = np.full((10, 10), 500)
         acc_data[5, 5] = 3000
         mock_grid.accumulation.return_value = acc_data
-        mock_grid.snap_to_mask.return_value = (-3.5, 50.7)
+        # Snapping is performed via ``View.snap_to_mask`` directly (not
+        # ``grid.snap_to_mask``) to avoid a NumPy 2.x incompatibility in
+        # pysheds' Grid.snap_to_mask.
+        mock_view.snap_to_mask.return_value = (-3.5, 50.7)
 
         catch_data = np.zeros((10, 10), dtype=np.int32)
         catch_data[4:7, 4:7] = 1
@@ -669,7 +676,7 @@ class TestDelineateCatchmentWorkflow:
         )
 
         # The first positional arg to snap_to_mask should be (acc > threshold)
-        snap_call_args = mock_grid.snap_to_mask.call_args
+        snap_call_args = mock_view.snap_to_mask.call_args
         mask_arg = snap_call_args[0][0]
         expected_mask = acc_data > threshold
         np.testing.assert_array_equal(mask_arg, expected_mask)

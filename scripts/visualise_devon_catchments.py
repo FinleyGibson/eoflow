@@ -1,16 +1,17 @@
 """
-Visualise Devon water-quality sample points with their delineated
-catchment polygons on an interactive map.
+Visualise water-quality sample points with their delineated catchment
+polygons on an interactive map.
 
-Reads the GeoPackage produced by ``delineate_catchments.py`` and the Devon
-DEM GeoTIFF, then displays:
+Reads the GeoPackage produced by ``delineate_catchments.py`` and (optionally)
+a DEM GeoTIFF and boundary shapefile for the study area, then displays:
 
-* The Devon county boundary (from the shapefile)
-* A semi-transparent DEM elevation overlay
-* A flow-accumulation overlay highlighting the drainage network
-* Delineated catchment polygons colour-coded by turbidity (or another
-  value column)
-* Sample-point markers with informative popups
+* An optional boundary outline (from a shapefile)
+* A semi-transparent DEM elevation overlay (optional)
+* A flow-accumulation overlay highlighting the drainage network (optional)
+* Sample-point markers with informative popups, colour-coded by a value
+  column (e.g. turbidity)
+* Delineated catchment polygons for each sample point, hidden by default
+  and revealed by clicking on the corresponding sample marker
 
 The resulting HTML page is written to disk and opened automatically in
 the default web browser.
@@ -18,17 +19,17 @@ the default web browser.
 Usage
 -----
     python -m scripts.visualise_devon_catchments \
-        --gpkg data/devon_water_quality_dataset.gpkg \
-        --dem data/devon_dem.tif
+        --gpkg data/water_quality_dataset.gpkg \
+        --dem data/dem.tif
 
     # With all options
     python -m scripts.visualise_devon_catchments \
-        --gpkg data/devon_water_quality_dataset.gpkg \
-        --dem data/devon_dem.tif \
-        --shapefile data/devon_county \
+        --gpkg data/water_quality_dataset.gpkg \
+        --dem data/dem.tif \
+        --shapefile data/study_area_boundary \
         --value-column result \
-        --output devon_catchments_map.html \
-        --opacity 0.5 \
+        --output catchments_map.html \
+        --dem-opacity 0.5 \
         --max-pixels 2048 \
         --flow-acc-threshold 100 \
         --no-flow-acc
@@ -66,11 +67,6 @@ from eoflow.log_utils import get_logger
 from eoflow.utils import load_shapefile
 
 logger = get_logger(__file__)
-
-# Default paths (relative to the repo root)
-_DEFAULT_GPKG = Path(__file__).resolve().parent.parent / "data" / "devon_water_quality_dataset.gpkg"
-_DEFAULT_DEM = Path(__file__).resolve().parent.parent / "data" / "devon_dem.tif"
-_DEFAULT_SHAPEFILE = Path(__file__).resolve().parent.parent / "data" / "devon_county"
 
 # Mercator ↔ WGS 84 transformer (reused by DEM helpers)
 _MERCATOR_TO_WGS84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
@@ -450,10 +446,11 @@ def visualise(
     gpkg_path : Path
         GeoPackage produced by ``delineate_catchments.py``.
     dem_path : Path or None
-        Devon DEM GeoTIFF. If provided, rendered as a semi-transparent
-        elevation overlay and used to compute the flow-accumulation layer.
+        DEM GeoTIFF covering the study area. If provided, rendered as a
+        semi-transparent elevation overlay and used to compute the
+        flow-accumulation layer.
     shapefile_path : Path or None
-        Devon county boundary shapefile. If provided, drawn as an
+        Boundary shapefile for the study area. If provided, drawn as an
         outline on the map.
     value_column : str or None
         Column to colour-code sample markers by. Auto-detected when
@@ -665,18 +662,18 @@ def visualise(
             logger.warning("Could not render flow-accumulation overlay: %s", exc)
 
     # ------------------------------------------------------------------
-    # 5. Devon county boundary (optional)
+    # 5. Study area boundary (optional)
     # ------------------------------------------------------------------
     if shapefile_path is not None and Path(shapefile_path).exists():
-        logger.info("Loading Devon boundary from %s …", shapefile_path)
+        logger.info("Loading boundary from %s …", shapefile_path)
         try:
-            devon_gdf = load_shapefile(shapefile_path)
-            if devon_gdf.crs is not None and devon_gdf.crs != "EPSG:4326":
-                devon_gdf = devon_gdf.to_crs("EPSG:4326")
+            boundary_gdf = load_shapefile(shapefile_path)
+            if boundary_gdf.crs is not None and boundary_gdf.crs != "EPSG:4326":
+                boundary_gdf = boundary_gdf.to_crs("EPSG:4326")
 
             folium.GeoJson(
-                devon_gdf.__geo_interface__,
-                name="Devon Boundary",
+                boundary_gdf.__geo_interface__,
+                name="Boundary",
                 style_function=lambda _: {
                     "fillColor": "transparent",
                     "color": "#333333",
@@ -685,16 +682,20 @@ def visualise(
                     "fillOpacity": 0,
                 },
             ).add_to(m)
-            logger.info("Devon boundary added")
+            logger.info("Boundary added")
         except Exception as exc:
-            logger.warning("Could not load Devon boundary: %s", exc)
+            logger.warning("Could not load boundary: %s", exc)
 
     # ------------------------------------------------------------------
-    # 6. Catchment polygons
+    # 6. Catchment polygons (hidden by default, revealed on marker click)
     # ------------------------------------------------------------------
-    catchment_fg = folium.FeatureGroup(name="Catchment Polygons", show=True)
+    # Each catchment polygon is added directly to the map with `show=False`
+    # so Leaflet creates the layer but does not display it initially, and
+    # `control=False` so it doesn't clutter the layer-control list. A click
+    # handler (added in section 7) toggles the corresponding layer on/off.
+    catchment_layer_names: dict[object, str] = {}
 
-    for _, row in plot_gdf.iterrows():
+    for idx, row in plot_gdf.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
@@ -706,7 +707,7 @@ def visualise(
         # Convert the polygon geometry to GeoJSON
         geo_json = gpd.GeoDataFrame([row], geometry="geometry", crs=gdf.crs).__geo_interface__
 
-        folium.GeoJson(
+        catchment_layer = folium.GeoJson(
             geo_json,
             style_function=lambda _, c=colour: {
                 "fillColor": c,
@@ -721,9 +722,11 @@ def visualise(
                 "fillOpacity": 0.45,
             },
             tooltip=f"{name}: {value_col}={val}",
-        ).add_to(catchment_fg)
-
-    catchment_fg.add_to(m)
+            show=False,
+            control=False,
+        )
+        catchment_layer.add_to(m)
+        catchment_layer_names[idx] = catchment_layer.get_name()
 
     # ------------------------------------------------------------------
     # 7. Sample point markers and snap-offset lines
@@ -733,7 +736,11 @@ def visualise(
 
     has_snap_cols = "snap_latitude" in plot_gdf.columns and "snap_longitude" in plot_gdf.columns
 
-    for _, row in plot_gdf.iterrows():
+    # Pairs of (marker JS var name, catchment JS var name) used to wire up
+    # the click-to-reveal behaviour once all layers have been created.
+    marker_catchment_pairs: list[tuple[str, str]] = []
+
+    for idx, row in plot_gdf.iterrows():
         val = float(row["_value"])
         colour = str(row["_colour"])
         radius = 5 + 8 * _norm(val)
@@ -743,7 +750,7 @@ def visualise(
         lon = float(row["longitude"])
 
         # Sample location marker
-        folium.CircleMarker(
+        marker = folium.CircleMarker(
             location=[lat, lon],
             radius=radius,
             color="#333333",
@@ -752,8 +759,13 @@ def visualise(
             fill_opacity=0.9,
             weight=2,
             popup=folium.Popup(popup_html, max_width=350),
-            tooltip=f"{row.get('samplingPoint.prefLabel', '')}: {val}",
-        ).add_to(marker_fg)
+            tooltip=f"{row.get('samplingPoint.prefLabel', '')}: {val} (click for catchment)",
+        )
+        marker.add_to(marker_fg)
+
+        catchment_name = catchment_layer_names.get(idx)
+        if catchment_name is not None:
+            marker_catchment_pairs.append((marker.get_name(), catchment_name))
 
         # Snap-offset line and pour-point marker
         if has_snap_cols:
@@ -787,6 +799,54 @@ def visualise(
 
     marker_fg.add_to(m)
     snap_fg.add_to(m)
+
+    # ------------------------------------------------------------------
+    # 7b. Wire up click-to-reveal behaviour for catchment polygons
+    # ------------------------------------------------------------------
+    if marker_catchment_pairs:
+        pairs_js = ",\n            ".join(
+            f"[{marker_var}, {catchment_var}]"
+            for marker_var, catchment_var in marker_catchment_pairs
+        )
+        click_js = f"""
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {{
+            var targetMap = {m.get_name()};
+            var pairs = [
+            {pairs_js}
+            ];
+            var activeCatchment = null;
+
+            function hideActive() {{
+                if (activeCatchment) {{
+                    targetMap.removeLayer(activeCatchment);
+                    activeCatchment = null;
+                }}
+            }}
+
+            pairs.forEach(function(pair) {{
+                var marker = pair[0];
+                var catchment = pair[1];
+                marker.on('click', function(e) {{
+                    if (window.L && L.DomEvent) {{
+                        L.DomEvent.stopPropagation(e);
+                    }}
+                    if (activeCatchment === catchment) {{
+                        hideActive();
+                        return;
+                    }}
+                    hideActive();
+                    catchment.addTo(targetMap);
+                    activeCatchment = catchment;
+                }});
+            }});
+
+            // Clicking anywhere else on the map hides the active catchment.
+            targetMap.on('click', hideActive);
+        }});
+        </script>
+        """
+        m.get_root().html.add_child(folium.Element(click_js))
 
     # ------------------------------------------------------------------
     # 8. Legends and controls
@@ -877,7 +937,7 @@ def visualise(
         html_path = Path(output_html).resolve()
         html_path.parent.mkdir(parents=True, exist_ok=True)
     else:
-        tmp = tempfile.NamedTemporaryFile(suffix=".html", prefix="devon_catchments_", delete=False)
+        tmp = tempfile.NamedTemporaryFile(suffix=".html", prefix="catchments_", delete=False)
         tmp.close()
         html_path = Path(tmp.name).resolve()
 
@@ -886,15 +946,15 @@ def visualise(
     n_catchments = sum(
         1 for _, r in plot_gdf.iterrows() if r.geometry is not None and not r.geometry.is_empty
     )
-    print(f"\nMap saved to {html_path}")
-    print(f"  Sample points    : {len(plot_gdf)}")
-    print(f"  Catchments       : {n_catchments}")
+    logger.info("Map saved to %s", html_path)
+    logger.info("  Sample points    : %d", len(plot_gdf))
+    logger.info("  Catchments       : %d", n_catchments)
     if dem_path:
-        print(f"  DEM overlay      : {dem_path}")
+        logger.info("  DEM overlay      : %s", dem_path)
     if show_flow_acc and dem_path:
-        print(f"  Flow acc overlay : threshold={flow_acc_threshold} cells")
+        logger.info("  Flow acc overlay : threshold=%s cells", flow_acc_threshold)
     if shapefile_path:
-        print(f"  Boundary         : {shapefile_path}")
+        logger.info("  Boundary         : %s", shapefile_path)
 
     webbrowser.open(html_path.as_uri())
     return html_path
@@ -908,28 +968,28 @@ def visualise(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Visualise Devon water-quality sample points and their "
-            "delineated catchment polygons on an interactive map."
+            "Visualise water-quality sample points and their delineated "
+            "catchment polygons on an interactive map."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
         "--gpkg",
         type=Path,
-        default=_DEFAULT_GPKG,
+        required=True,
         help="Path to the GeoPackage produced by delineate_catchments.py.",
     )
     p.add_argument(
         "--dem",
         type=Path,
-        default=_DEFAULT_DEM,
-        help="Path to the Devon DEM GeoTIFF. Pass 'none' to skip.",
+        default=None,
+        help="Path to a DEM GeoTIFF covering the study area. Omit to skip.",
     )
     p.add_argument(
         "--shapefile",
         type=Path,
-        default=_DEFAULT_SHAPEFILE,
-        help="Path to the Devon county shapefile. Pass 'none' to skip.",
+        default=None,
+        help="Path to a boundary shapefile for the study area. Omit to skip.",
     )
     p.add_argument(
         "--value-column",
@@ -992,7 +1052,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if not args.gpkg.exists():
-        print(f"Error: GeoPackage not found: {args.gpkg}", file=sys.stderr)
+        logger.error("GeoPackage not found: %s", args.gpkg)
         sys.exit(1)
 
     # Allow user to pass --dem none / --shapefile none to skip
@@ -1000,11 +1060,11 @@ def main(argv: list[str] | None = None) -> None:
     shp = args.shapefile if str(args.shapefile).lower() != "none" else None
 
     if dem is not None and not dem.exists():
-        print(f"Warning: DEM not found ({dem}), skipping DEM overlay.", file=sys.stderr)
+        logger.warning("DEM not found (%s), skipping DEM overlay.", dem)
         dem = None
 
     if shp is not None and not shp.exists():
-        print(f"Warning: Shapefile not found ({shp}), skipping boundary.", file=sys.stderr)
+        logger.warning("Shapefile not found (%s), skipping boundary.", shp)
         shp = None
 
     try:
@@ -1021,7 +1081,8 @@ def main(argv: list[str] | None = None) -> None:
             flow_acc_opacity=args.flow_acc_opacity,
         )
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

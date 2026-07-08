@@ -22,7 +22,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from eoflow.log_utils import get_logger
 from eoflow.samples import Sample
+
+logger = get_logger(__file__)
 
 # ---------------------------------------------------------------------------
 # Fixed paths and time window
@@ -79,7 +82,7 @@ def main() -> None:
 
     # --- Report results -------------------------------------------------------
     if da.size == 0:
-        print("WARNING: returned an empty DataArray — no files matched the time window.")
+        logger.warning("Returned an empty DataArray — no files matched the time window.")
         return
 
     print("Result:")

@@ -238,7 +238,7 @@ def get_devon_dem(
         Path to the clipped GeoTIFF.
     """
     # --- Step 1: Load shapefile -------------------------------------------
-    print(f"\nStep 1: Loading Devon boundary from {shapefile_path} …")
+    logger.info("Step 1: Loading Devon boundary from %s …", shapefile_path)
     gdf = _load_devon_gdf(shapefile_path)
 
     bounds = gdf.total_bounds  # (minx, miny, maxx, maxy) → (west, south, east, north)
@@ -250,13 +250,13 @@ def get_devon_dem(
         west -= pad
         east += pad
 
-    print(f"  ✓ Devon boundary loaded ({len(gdf)} feature(s))")
-    print(f"  Bounding box (padded {pad}°):")
-    print(f"    Longitude: [{west:.4f}, {east:.4f}]")
-    print(f"    Latitude:  [{south:.4f}, {north:.4f}]")
+    logger.info("  ✓ Devon boundary loaded (%d feature(s))", len(gdf))
+    logger.info("  Bounding box (padded %s°):", pad)
+    logger.info("    Longitude: [%.4f, %.4f]", west, east)
+    logger.info("    Latitude:  [%.4f, %.4f]", south, north)
 
     # --- Step 2: Download DEM for the bounding box ------------------------
-    print(f"\nStep 2: Downloading {dem_type} DEM from OpenTopography …")
+    logger.info("Step 2: Downloading %s DEM from OpenTopography …", dem_type)
 
     output_path = Path(output_path)
     bbox_path = output_path.with_name(output_path.stem + "_bbox.tif")
@@ -270,13 +270,13 @@ def get_devon_dem(
         dem_type=dem_type,
         api_key=api_key,
     )
-    print(f"  ✓ Bounding-box DEM saved to {bbox_path}")
+    logger.info("  ✓ Bounding-box DEM saved to %s", bbox_path)
 
     # --- Step 3: Clip to Devon polygon ------------------------------------
-    print("\nStep 3: Clipping DEM to Devon boundary …")
+    logger.info("Step 3: Clipping DEM to Devon boundary …")
 
     _clip_dem_to_polygon(bbox_path, gdf, output_path)
-    print(f"  ✓ Clipped DEM saved to {output_path}")
+    logger.info("  ✓ Clipped DEM saved to %s", output_path)
 
     # Clean up the intermediate bounding-box file
     bbox_path.unlink(missing_ok=True)
@@ -370,7 +370,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         gdf = _load_devon_gdf(args.shapefile)
     except Exception as exc:
-        print(f"\nError loading shapefile: {exc}", file=sys.stderr)
+        logger.error("Error loading shapefile: %s", exc)
         sys.exit(1)
 
     bounds = gdf.total_bounds
@@ -397,7 +397,7 @@ def main(argv: list[str] | None = None) -> None:
             api_key=args.api_key,
         )
     except RuntimeError as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
+        logger.error("%s", exc)
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nInterrupted.", file=sys.stderr)

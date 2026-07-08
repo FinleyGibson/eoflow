@@ -29,7 +29,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from eoflow.log_utils import get_logger
 from eoflow.utils import easting_northing_to_latlon
+
+logger = get_logger(__file__)
 
 # ---- Column groups --------------------------------------------------------
 
@@ -126,7 +129,7 @@ def convert(input_path: Path, output_path: Path) -> pd.DataFrame:
     # --- Write output -----------------------------------------------------
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
-    print(f"Converted CSV written to {output_path}  ({len(df)} rows)")
+    logger.info("Converted CSV written to %s  (%d rows)", output_path, len(df))
     return df
 
 
@@ -157,13 +160,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if not args.input.exists():
-        print(f"Error: input file not found: {args.input}", file=sys.stderr)
+        logger.error("Input file not found: %s", args.input)
         sys.exit(1)
 
     try:
         convert(args.input, args.output)
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

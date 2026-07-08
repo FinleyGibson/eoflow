@@ -32,7 +32,10 @@ import folium
 import numpy as np
 import pandas as pd
 
+from eoflow.log_utils import get_logger
 from eoflow.utils import easting_northing_to_latlon
+
+logger = get_logger(__file__)
 
 # ---- Well-known column sets ------------------------------------------------
 
@@ -258,7 +261,7 @@ def visualise(
         html_path = Path(tmp.name).resolve()
 
     m.save(str(html_path))
-    print(f"Map saved to {html_path}  ({len(plot_df)} points)")
+    logger.info("Map saved to %s  (%d points)", html_path, len(plot_df))
     webbrowser.open(html_path.as_uri())
     return html_path
 
@@ -299,13 +302,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if not args.input.exists():
-        print(f"Error: input file not found: {args.input}", file=sys.stderr)
+        logger.error("Input file not found: %s", args.input)
         sys.exit(1)
 
     try:
         visualise(args.input, value_column=args.value_column, output_html=args.output)
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

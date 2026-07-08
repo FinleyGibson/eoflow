@@ -3,10 +3,22 @@ from typing import Any, Optional, Tuple, Union
 
 import numpy as np
 import rasterio
-from pysheds.grid import Grid
 from shapely.geometry import Point, Polygon, shape
 
 from eoflow.log_utils import get_logger
+
+# ---------------------------------------------------------------------------
+# NumPy 2.x compatibility shim
+# ---------------------------------------------------------------------------
+# ``np.in1d`` was deprecated in NumPy 2.0 in favour of ``np.isin`` and has
+# been removed entirely in later NumPy 2.x releases (e.g. 2.4).  pysheds 0.4
+# still calls ``np.in1d`` internally (pgrid.py / sgrid.py), so we restore it
+# as a thin alias before importing pysheds.
+if not hasattr(np, "in1d"):
+    np.in1d = np.isin
+
+from pysheds.grid import Grid  # noqa: E402  (must come after the np.in1d shim)
+from pysheds.sview import View  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -131,9 +143,22 @@ def _delineate_catchment_core(
 
     # Step 5: Snap pour point to nearest high-accumulation cell
     # This ensures the pour point is on a stream rather than a hillslope
+    #
+    # NOTE: We deliberately avoid ``grid.snap_to_mask`` here. Under NumPy 2.x
+    # (NEP 50), that method fails unconditionally: it internally calls
+    # ``self.view(mask, ..., nodata=False, dtype=np.bool_)`` using the *Python*
+    # bool literal ``False`` rather than ``np.bool_(False)``, and
+    # ``np.can_cast`` raises ``TypeError`` for Python scalars. This makes
+    # every snap attempt fail and silently fall back to the raw, unsnapped
+    # pour point (producing near-zero catchments). We instead call the
+    # lower-level ``View.snap_to_mask`` directly on a plain boolean array,
+    # which performs the same nearest-neighbour (KD-tree) lookup without
+    # going through the broken ``view()``/nodata-casting code path.
     try:
         logger.debug("Snapping pour point to nearest high-accumulation cell")
-        x_snap, y_snap = grid.snap_to_mask(acc > flow_acc_threshold, (x, y), return_dist=False)
+        mask = np.asarray(acc) > flow_acc_threshold
+        x_snap, y_snap = View.snap_to_mask(mask, (x, y), affine=grid.affine, return_dist=False)
+        x_snap, y_snap = float(x_snap), float(y_snap)
         snap_dist = ((x_snap - x) ** 2 + (y_snap - y) ** 2) ** 0.5
         logger.info(
             "  Pour point snapped: (%.6f, %.6f) → (%.6f, %.6f)  offset=%.6f°",

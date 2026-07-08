@@ -571,16 +571,10 @@ def get_ea_water_quality(
 
 # Example usage
 if __name__ == "__main__":
-    import logging
+    from eoflow.log_utils import get_logger, set_level
 
-    # create test logger
-    logger = logging.getLogger(f"src{__file__.split('src')[-1]}: {__name__}")
-    logger.setLevel(logging.DEBUG)
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.DEBUG)
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    logger = get_logger(__file__)
+    set_level(logger, "DEBUG")
 
     test_config = {
         "api": {

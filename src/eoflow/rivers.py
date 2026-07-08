@@ -97,7 +97,6 @@ Notes
 
 from __future__ import annotations
 
-import logging
 import time
 from random import uniform
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -131,7 +130,7 @@ _REQUEST_HEADERS = {
 }
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 from requests.exceptions import ConnectionError, RequestException, Timeout

@@ -429,7 +429,9 @@ def visualise(
         html_path = Path(tmp.name).resolve()
 
     m.save(str(html_path))
-    print(f"Map saved to {html_path}  ({elevation.shape[0]}×{elevation.shape[1]} pixels)")
+    logger.info(
+        "Map saved to %s  (%d×%d pixels)", html_path, elevation.shape[0], elevation.shape[1]
+    )
     webbrowser.open(html_path.as_uri())
     return html_path
 
@@ -488,11 +490,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
     if not args.input.exists():
-        print(f"Error: input file not found: {args.input}", file=sys.stderr)
+        logger.error("Input file not found: %s", args.input)
         sys.exit(1)
 
     if not (0.0 <= args.opacity <= 1.0):
-        print(f"Error: --opacity must be between 0.0 and 1.0, got {args.opacity}", file=sys.stderr)
+        logger.error("--opacity must be between 0.0 and 1.0, got %s", args.opacity)
         sys.exit(1)
 
     try:
@@ -504,7 +506,8 @@ def main(argv: list[str] | None = None) -> None:
             hillshade=not args.no_hillshade,
         )
     except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Fatal error: %s", exc, exc_info=True)
+        print(f"\nERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

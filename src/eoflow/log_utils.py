@@ -257,28 +257,6 @@ def disable_library_logging(library_name: str, level: int = logging.WARNING) -> 
     logging.getLogger(library_name).setLevel(level)
 
 
-# Module-level logger for internal use
-_module_logger: Optional[logging.Logger] = None
-
-
-def get_module_logger() -> logging.Logger:
-    """
-    Get the default logger for the eoflow package.
-
-    Returns:
-        Logger instance for eoflow.
-
-    Example:
-        >>> from eoflow.logging import get_module_logger
-        >>> logger = get_module_logger()
-        >>> logger.info("Using eoflow logger")
-    """
-    global _module_logger
-    if _module_logger is None:
-        _module_logger = setup_logging("eoflow")
-    return _module_logger
-
-
 # Example usage
 if __name__ == "__main__":
     # Example 1: Basic console logging

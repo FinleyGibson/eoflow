@@ -52,10 +52,21 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from pysheds.grid import Grid
 from shapely.geometry import mapping, shape
 
 from eoflow.log_utils import get_logger
+
+# ---------------------------------------------------------------------------
+# NumPy 2.x compatibility shim
+# ---------------------------------------------------------------------------
+# ``np.in1d`` was deprecated in NumPy 2.0 in favour of ``np.isin`` and has
+# been removed entirely in later NumPy 2.x releases (e.g. 2.4).  pysheds 0.4
+# still calls ``np.in1d`` internally (pgrid.py / sgrid.py), so we restore it
+# as a thin alias before importing pysheds.
+if not hasattr(np, "in1d"):
+    np.in1d = np.isin
+
+from pysheds.grid import Grid  # noqa: E402  (must come after the np.in1d shim)
 
 logger = get_logger(__file__)
 

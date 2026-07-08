@@ -32,7 +32,6 @@ import argparse
 import sys
 import time
 import traceback
-from logging import FileHandler
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -43,6 +42,7 @@ from shapely.geometry import Point, Polygon
 
 from eoflow.catchment import _delineate_catchment_core
 from eoflow.log_utils import (
+    add_file_handler,
     disable_library_logging,
     get_logger,
     set_level,
@@ -300,7 +300,6 @@ def delineate_catchments(
                 point=point,
                 dem_path=dem_path,
                 flow_acc_threshold=flow_acc_threshold,
-                logger=logger,
             )
             elapsed = time.perf_counter() - t0
             cache[loc_key] = (polygon, snapped_point, flow_acc)
@@ -443,7 +442,7 @@ def main(argv: list[str] | None = None) -> None:
 
     set_level(logger, args.log_level)
     if args.log_file:
-        logger.addHandler(FileHandler(args.log_file))
+        add_file_handler(logger, args.log_file)
 
     for lib in _NOISY_LIBRARIES:
         disable_library_logging(lib)
@@ -488,8 +487,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    logger = get_logger(__file__)
-    print("Running __main__...")
-    logger.info("info logging...")
-    logger.debug("debug logging...")
     main()

@@ -470,7 +470,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             south, west, north, east = _parse_bbox(args.bbox, pad=args.pad)
     except Exception as exc:
-        print(f"Error resolving bounding box: {exc}", file=sys.stderr)
+        logger.error("Error resolving bounding box: %s", exc)
         sys.exit(1)
 
     # --- Confirm large downloads ------------------------------------------
@@ -492,7 +492,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"\nDEM written to {result_path}")
     except RuntimeError as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
+        logger.error("%s", exc)
         sys.exit(1)
     except KeyboardInterrupt:
         print("\n\nInterrupted.", file=sys.stderr)
