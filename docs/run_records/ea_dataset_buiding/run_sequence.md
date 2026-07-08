@@ -42,16 +42,21 @@ Copied to remote servers assets directory via SCP.
 scp out/ea_turbidity_2010-2024_clean.csv fjg205@10.121.4.88:/home/fjg205/projects/eoflow/assets/turbidity_samples/
 ```
 
-4. Delinated catchments
+## 4. Delineated catchments
 
-```bash
-sh -c 'uv run scripts/delineate_catchments.py --csv assets/turbidity_samples/ea_turbidity_2010-2024_clean.csv --out assets/sample_catchments/ea_turbidity_2010-2024_catchments_$1.gpkg --DEM assets/devon_dem_cop30.tif --lat-col latitude --lon-col longitude --log-file logs/ea_turbidity_2010-2014_$1.log' _ 00
+```sh
+uv run scripts/delineate_catchments.py --csv data/ea_water_quality/turbidity_2010-01_2026-06_clean.csv --dem data/dems/devon_dem_cop30.tif --out data/delineated_catchments/devon_turbidity_sites_2010-10_2026-06.pkg --lat-col latitude --lon-col longitude
 ```
 
-Note: Wrapped in` sh -c` to set $1 to 00 in case it needs repeating.
-Note: This ignores duplicate locations
+### 4.1 Visualise catchments
 
-## 5. Compute layers
+```sh
+uv run scripts/visualise_devon_catchments.py --gpkg data/delineated_catchments/devon_turbidity_sites_2010-10_2026-06.pkg --dem data/dems/devon_dem_cop30.tif --value-column "Turbidity (NEPHELOMETRIC TURBIDITY UNITS)"  --no-flow-ac
+```
+
+The use of `--no-flow-ac` is just to speed up this process.
+
+## 5. Compute layers for whole study area
 
 ```bash
 uv run scripts/prepare_samples.py --gpkg assets/sample_catchments/ea_turbidity_2010-2024_catchments_00.gpkg --dem assets/devon_dem_cop30.tif --out-dir outputs/layered_samples/ea_samples_2010-2024_catchments_00.gpkg --rainfall-start 2010-01-01 --rainfall-end 2023-12-31 --eo-start 2010-01-01 --eo-end 2023-12-31

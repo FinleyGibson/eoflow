@@ -29,11 +29,16 @@ Typical usage
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional, Sequence, Tuple
 
+from dotenv import load_dotenv
+
 from eoflow.log_utils import get_logger
+
+load_dotenv()
 
 if TYPE_CHECKING:
     import openeo  # type: ignore[import-untyped]
@@ -84,9 +89,13 @@ def connect(
         URL of the openEO backend.  Defaults to the Copernicus Data Space
         Federation endpoint (``openeofed.dataspace.copernicus.eu``).
     authenticate : bool
-        If *True* (default), trigger OIDC device-flow authentication.
-        Pass *False* for an unauthenticated connection (only publicly
-        accessible collections will be accessible).
+        If *True* (default), authenticate before returning the connection.
+        If ``OPENEO_AUTH_CLIENT_ID`` and ``OPENEO_AUTH_CLIENT_SECRET`` are
+        set (e.g. via a ``.env`` file), the OIDC client credentials flow is
+        used non-interactively; otherwise falls back to interactive OIDC
+        device-flow authentication.  Pass *False* for an unauthenticated
+        connection (only publicly accessible collections will be
+        accessible).
 
     Returns
     -------
@@ -101,7 +110,7 @@ def connect(
     --------
     ::
 
-        conn = eo.connect()                       # interactive OIDC login
+        conn = eo.connect()                       # client credentials, or interactive OIDC login
         conn = eo.connect(authenticate=False)     # no auth (public only)
     """
     try:
@@ -115,8 +124,12 @@ def connect(
     logger.info("Connecting to openEO backend: %s", backend)
     conn = _openeo.connect(backend)
     if authenticate:
-        conn.authenticate_oidc()
-        logger.info("OIDC authentication complete")
+        if os.environ.get("OPENEO_AUTH_CLIENT_ID") and os.environ.get("OPENEO_AUTH_CLIENT_SECRET"):
+            conn.authenticate_oidc_client_credentials()
+            logger.info("OIDC client credentials authentication complete")
+        else:
+            conn.authenticate_oidc()
+            logger.info("OIDC authentication complete")
     return conn
 
 
