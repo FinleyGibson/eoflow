@@ -214,14 +214,24 @@ class TestSampleProperties:
     def test_date_none_when_missing(self):
         row = _make_row()
         row["Date"] = None
+        row["phenomenonTime"] = None
         s = Sample(row=row, catchment=_make_polygon())
         assert s.date is None
 
     def test_date_none_when_nan_float(self):
         row = _make_row()
         row["Date"] = float("nan")
+        row["phenomenonTime"] = float("nan")
         s = Sample(row=row, catchment=_make_polygon())
         assert s.date is None
+
+    def test_date_falls_back_to_phenomenon_time(self):
+        """When there's no legacy "Date" column, phenomenonTime is used."""
+        row = _make_row()
+        row["Date"] = None
+        row["phenomenonTime"] = "2021-03-09T08:15:00"
+        s = Sample(row=row, catchment=_make_polygon())
+        assert s.date == date(2021, 3, 9)
 
     def test_delineation_status(self):
         s = _make_sample(status="ok")
@@ -433,6 +443,7 @@ class TestSampleDates:
     def test_resolve_dates_raises_without_date_and_no_window(self):
         row = _make_row()
         row["Date"] = None
+        row["phenomenonTime"] = None
         s = Sample(row=row, catchment=_make_polygon())
         with pytest.raises(ValueError, match="no date"):
             s._resolve_dates(None, None, None)
@@ -440,6 +451,7 @@ class TestSampleDates:
     def test_resolve_dates_raises_days_window_without_sample_date(self):
         row = _make_row()
         row["Date"] = None
+        row["phenomenonTime"] = None
         s = Sample(row=row, catchment=_make_polygon())
         with pytest.raises(ValueError, match="days_window"):
             s._resolve_dates(None, None, 15)

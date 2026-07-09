@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -59,11 +60,59 @@ _COL_SNAP_LON = "snap_longitude"
 _COL_FLOW_ACC = "flow_acc_at_pour_point"
 _COL_STATUS = "delineation_status"
 _COL_ERROR = "delineation_error"
-_COL_RESULT = "result"
-_COL_DATE = "Date"
 _COL_SITE = "samplingPoint.prefLabel"
 _COL_NOTATION = "samplingPoint.notation"
 _COL_WKT = "__catchment_wkt"
+
+# Legacy schema (unit/determinand kept as separate columns alongside a
+# plain "result" column). Checked first for backward compatibility.
+_COL_RESULT = "result"
+_COL_UNIT = "unit"
+_COL_DETERMINAND = "determinand.prefLabel"
+_COL_DATE = "Date"
+
+# convert_ea_csv.py's actual output schema: no "Date"/"result"/"unit" columns
+# — the sample timestamp lives in "phenomenonTime", and the result column is
+# dynamically named "<determinand> (<unit>)" (or just "<determinand>" when
+# there's no unit), see scripts/convert_ea_csv.py:_build_column_name.
+_COL_PHENOMENON_TIME = "phenomenonTime"
+_RESULT_COL_PATTERN = re.compile(r"^(?P<determinand>.+) \((?P<unit>[^()]+)\)$")
+
+# Every column convert_ea_csv.py / delineate_catchments.py can emit besides
+# the dynamic "<determinand> (<unit>)" result column — anything else found on
+# a row is assumed to be that dynamic result column.
+_KNOWN_METADATA_COLS = frozenset(
+    {
+        "id",
+        _COL_NOTATION,
+        _COL_SITE,
+        "samplingPoint.easting",
+        "samplingPoint.northing",
+        "samplingPoint.region",
+        "samplingPoint.area",
+        "samplingPoint.subArea",
+        "samplingPoint.samplingPointStatus",
+        "samplingPoint.samplingPointType",
+        _COL_PHENOMENON_TIME,
+        "samplingPurpose",
+        "sampleMaterialType",
+        _COL_DATE,
+        _COL_RESULT,
+        _COL_UNIT,
+        "determinand.notation",
+        _COL_DETERMINAND,
+        "result_numeric",
+        _COL_LAT,
+        _COL_LON,
+        _COL_SNAP_LAT,
+        _COL_SNAP_LON,
+        _COL_FLOW_ACC,
+        _COL_STATUS,
+        _COL_ERROR,
+        _COL_WKT,
+        "geometry",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -242,22 +291,60 @@ class Sample:
         v = self._row.get(_COL_FLOW_ACC)
         return float(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else None
 
+    def _detect_result_column(self) -> Optional[str]:
+        """Find the dynamically-named determinand column from convert_ea_csv.py.
+
+        convert_ea_csv.py renames the raw ``result`` column to
+        ``"<determinand> (<unit>)"`` (or just ``"<determinand>"`` when there
+        is no unit) — see ``scripts/convert_ea_csv.py:_build_column_name``.
+        Anything on the row that isn't one of the well-known
+        identifier/geometry columns is assumed to be this column.
+        """
+        candidates = [c for c in self._row.index if c not in _KNOWN_METADATA_COLS]
+        return candidates[0] if len(candidates) == 1 else None
+
     @property
     def result(self) -> Optional[float]:
-        v = self._row.get(_COL_RESULT)
-        return float(v) if v is not None and not (isinstance(v, float) and math.isnan(v)) else None
+        if _COL_RESULT in self._row.index:
+            v = self._row.get(_COL_RESULT)
+        else:
+            col = self._detect_result_column()
+            v = self._row.get(col) if col is not None else None
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            # EA data represents non-detects/censored readings as e.g. "<1"
+            # rather than a plain number; treat as missing rather than error.
+            return None
 
     @property
     def unit(self) -> str:
-        return str(self._row.get("unit", ""))
+        if _COL_UNIT in self._row.index:
+            return str(self._row.get(_COL_UNIT, ""))
+        col = self._detect_result_column()
+        if col is not None:
+            m = _RESULT_COL_PATTERN.match(col)
+            if m:
+                return m.group("unit")
+        return ""
 
     @property
     def determinand(self) -> str:
-        return str(self._row.get("determinand.prefLabel", ""))
+        if _COL_DETERMINAND in self._row.index:
+            return str(self._row.get(_COL_DETERMINAND, ""))
+        col = self._detect_result_column()
+        if col is not None:
+            m = _RESULT_COL_PATTERN.match(col)
+            return m.group("determinand") if m else col
+        return ""
 
     @property
     def date(self) -> Optional[date]:
         raw = self._row.get(_COL_DATE)
+        if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+            raw = self._row.get(_COL_PHENOMENON_TIME)
         if raw is None or (isinstance(raw, float) and math.isnan(raw)):
             return None
         try:

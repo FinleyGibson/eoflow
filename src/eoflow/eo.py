@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple, Union
 
 from dotenv import load_dotenv
 
@@ -596,6 +596,56 @@ def download_cube_as_xarray(
         tmp_path.unlink(missing_ok=True)
 
     return ds
+
+
+def download_cube_as_batch_job(
+    cube: "openeo.DataCube",
+    output_path: Union[str, Path],
+    *,
+    title: Optional[str] = None,
+    job_options: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Execute a datacube as an openEO batch job and download the result.
+
+    Unlike :func:`download_cube_as_xarray`, which runs the process graph
+    synchronously and is only suitable for small spatial/temporal extents,
+    this submits the process graph as an asynchronous batch job and blocks
+    until it completes.  Use this for requests too large for synchronous
+    download — e.g. a whole county over a full year.
+
+    Parameters
+    ----------
+    cube : openeo.DataCube
+        A fully-specified openEO process graph.
+    output_path : str or Path
+        Destination file (format inferred as NetCDF).
+    title : str, optional
+        Job title, shown in the backend's job listing.
+    job_options : dict, optional
+        Backend-specific job options (e.g. executor memory).
+
+    Returns
+    -------
+    Path
+        *output_path* after writing.
+
+    Raises
+    ------
+    OpenEoApiError
+        If the batch job fails on the backend.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Submitting batch job%s …", f" '{title}'" if title else "")
+    cube.execute_batch(
+        str(output_path),
+        out_format="netCDF",
+        title=title,
+        job_options=job_options,
+    )
+    logger.info("Batch job complete; downloaded to %s", output_path)
+    return output_path
 
 
 # ---------------------------------------------------------------------------

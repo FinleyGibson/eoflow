@@ -79,6 +79,15 @@ class Config:
                 "output_dir": "./output",
                 "temp_dir": None,
             },
+            "eo": {
+                "backend": "openeofed.dataspace.copernicus.eu",
+                "collection": "SENTINEL2_L2A",
+                "bands": ["B02", "B03", "B04", "B08"],
+                "indices": ["NDVI", "NDWI", "EVI"],
+                "max_cloud_cover": 85,
+                "days_window": 15,
+                "bbox_pad": 0.01,
+            },
         }
 
     @classmethod
