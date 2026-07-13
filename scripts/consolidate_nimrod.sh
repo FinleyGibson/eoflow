@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: concat_script.sh [-f] <source_dir> <target_dir>
+Usage: consolidate_nimrod.sh [-f] <source_dir> <target_dir>
 
 Merges the per-timestep NetCDF files in each day directory
 (YYYYMMDD, found at any depth under source_dir) into a single
@@ -26,13 +26,13 @@ Options:
 
 Examples:
   # Merge a single year
-  concat_script.sh raw/2020 concatenated/2020
+  consolidate_nimrod.sh raw/2020 concatenated/2020
 
   # Merge everything (all years), creating year subdirs under target
-  concat_script.sh raw concatenated
+  consolidate_nimrod.sh raw concatenated
 
   # Re-merge a single year, overwriting existing output
-  concat_script.sh -f raw/2020 concatenated/2020
+  consolidate_nimrod.sh -f raw/2020 concatenated/2020
 EOF
 }
 

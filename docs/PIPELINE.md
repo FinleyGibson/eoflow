@@ -14,7 +14,7 @@ The two main source streams — EA water quality samples and NIMROD rainfall —
 
     > _Optional QA:_ `visualise_dem.py` — render the DEM as an interactive map to check coverage before proceeding
 
-- **Study-area shapefile** — a polygon boundary for your area of interest, used by `process_nimrod_local.py` (to crop rainfall) and `ge_ea_water_quality_by_shapefile.py` (to filter samples). Administrative boundaries can be downloaded from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/), or one has been provided for the East Devon case study area of interest.
+- **Study-area shapefile** — a polygon boundary for your area of interest, used by `nimrod_process_local.py` (to crop rainfall) and `ge_ea_water_quality_by_shapefile.py` (to filter samples). Administrative boundaries can be downloaded from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/), or one has been provided for the East Devon case study area of interest.
 - **CEDA credentials** — a `CEDA_TOKEN` env var is required for NIMROD downloads (Stream B) and can be created at [ceda.ac.uk](https://accounts.ceda.ac.uk/realms/ceda/account/#/).
 - **Copernicus Data Space account** — a free account at [dataspace.copernicus.eu](https://dataspace.copernicus.eu) is required for Sentinel-2 EO data; authentication is via OIDC device-flow (interactive browser prompt) triggered automatically by `prepare_samples.py` unless `--skip-eo` is passed
 
@@ -65,24 +65,53 @@ CEDA_TOKEN=your_token_here
    Bulk-download one year of NIMROD 1 km composite radar tar files from CEDA → local `.tar` files
 
     ```
-    bash scripts/nimrod_download_script.sh 2023 data/nimrod_raw/
+    bash scripts/nimrod_download_script.sh 2023 data/nimrod_raw/2023
     ```
 
-6. **`process_nimrod_local.py`** — _needs: tar files + a shapefile for the study area_
+    > _Convenience wrapper:_ `download_all_nimrod.sh` — loops the above over 2016–2025 into `data/nimrod_<year>/`
+
+6. **`nimrod_process_local.py`** — _needs: tar files + a shapefile for the study area_
    Unpack each tar, crop every 5-minute timestep to the study-area boundary, write per-timestep NetCDF files:
 
     ```
-    data/nimrod_data/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
+    data/nimrod_processed/raw/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
     ```
 
     > _Optional QA:_ `visualise_nimrod.py` — overlay a single timestep or an aggregated (mean/max/sum) view of the processed NetCDF files on an interactive map to verify spatial coverage and values
 
-7. **`consolidate_nimrod.py`** _(optional)_
-   Merge all per-timestep files into a single time-concatenated NetCDF — faster for repeated loading across many samples
+    > _Convenience wrapper:_ `process_all_nimrod.sh` — loops the above over every `nimrod_<year>` directory found under `data/nimrod_raw/`
+
+7. **`consolidate_nimrod.sh`** _(optional)_
+   Merge per-timestep files into per-day NetCDFs — faster for repeated loading across many samples, and required before a day's data can be opened as a single time series at all.
+
+    NIMROD files store `time`, `forecast_reference_time`, and `forecast_period` as **scalar** coordinates rather than a record dimension, so a naive `ncrcat`/`cdo mergetime` either fails outright or (worse) silently keeps only one timestep. This script instead stacks each day's files with `ncecat` and repairs the time coordinates from the timestamps encoded in the filenames.
+
+    > This replaces `consolidate_nimrod.py` (still in `scripts/`, but no longer the recommended path), whose `xarray`/`dask`-based merge did not finish in practice on the full multi-year archive (tens of thousands of small per-timestep files).
+
     ```
-    python -m scripts.consolidate_nimrod \
-        --input  data/nimrod_data/2023 \
-        --output data/nimrod_2023.nc
+    # Merge one year
+    bash scripts/consolidate_nimrod.sh \
+        data/nimrod_processed/raw/2023 \
+        data/nimrod_processed/concatenated/2023
+
+    # Merge everything found under raw/, creating year subdirs under target
+    bash scripts/consolidate_nimrod.sh \
+        data/nimrod_processed/raw \
+        data/nimrod_processed/concatenated
+
+    # -f forces reprocessing of days that already have output; -h for full usage
+    ```
+
+    Output layout mirrors the input:
+
+    ```
+    data/nimrod_processed/concatenated/{year}/{YYYYMMDD}.nc
+    ```
+
+    Each day file already has a proper `time` record dimension, so if you want a single whole-year file matching the shape `get_nimrod_rainfall_for_polygon` expects from a consolidated file, a plain `ncrcat` over a year's day files is fast and sufficient:
+
+    ```
+    ncrcat data/nimrod_processed/concatenated/2023/*.nc data/nimrod_processed/concatenated/2023.nc
     ```
 
 ---
@@ -97,11 +126,13 @@ CEDA_TOKEN=your_token_here
     - _(optional)_ Fetches NDVI / NDWI from Sentinel-2 via openEO (`--skip-eo` to omit)
     - Saves each fully-populated `Sample` to disk → `data/sample_instances/<notation>/`
 
+    `--nimrod-dir` accepts either the raw per-timestep directory tree (step 6's output) or a single consolidated `.nc` file (step 7's output) — consolidation is a speed optimisation, not a requirement.
+
     ```
     python -m scripts.prepare_samples \
         --gpkg          outputs/catchments.gpkg \
         --dem           data/dems/dem.tif \
-        --nimrod-dir    data/nimrod_data \
+        --nimrod-dir    data/nimrod_processed/raw \
         --rainfall-days 10 \
         --eo-days       30
     ```
