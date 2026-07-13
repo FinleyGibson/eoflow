@@ -49,7 +49,7 @@ python -m scripts.visualise_dem
 - [x] Download NIMROD rainfall data — `data/nimrod_processed/raw/` covers 2020–2026
 - [x] Process and crop rainfall data to the study area — per-timestep files present in the expected layout
 - [ ] (Optional) Visualise rainfall outputs
-- [~] (Optional) Consolidate timesteps into a single NetCDF — **in progress**, via `scripts/consolidate_nimrod.sh` (replaces `consolidate_nimrod.py`, see `PIPELINE.md`); full backfill running as of 2026-07-13
+- [~] (Optional) Consolidate timesteps into per-day NetCDFs — **in progress**, via `scripts/consolidate_nimrod.sh` (see `PIPELINE.md`); full backfill running as of 2026-07-13
 
 ---
 

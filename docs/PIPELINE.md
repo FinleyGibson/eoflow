@@ -86,7 +86,7 @@ CEDA_TOKEN=your_token_here
 
     NIMROD files store `time`, `forecast_reference_time`, and `forecast_period` as **scalar** coordinates rather than a record dimension, so a naive `ncrcat`/`cdo mergetime` either fails outright or (worse) silently keeps only one timestep. This script instead stacks each day's files with `ncecat` and repairs the time coordinates from the timestamps encoded in the filenames.
 
-    > This replaces `consolidate_nimrod.py` (still in `scripts/`, but no longer the recommended path), whose `xarray`/`dask`-based merge did not finish in practice on the full multi-year archive (tens of thousands of small per-timestep files).
+    > An earlier `xarray`/`dask`-based merge (`consolidate_nimrod.py`) has been removed: its `open_mfdataset(parallel=True)` approach did not finish in practice on the full multi-year archive (tens of thousands of small per-timestep files) — it also turns out to be unsafe at any file count, since `xarray`'s file-handle cache isn't thread-safe.
 
     ```
     # Merge one year
@@ -169,7 +169,8 @@ Notebooks without a script equivalent:
 
 | Notebook                     | What it covers                                                                                                    |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `MET_office_rainfall.ipynb`  | Legacy Met Office UKV rainfall download and per-catchment analysis (superseded by the NIMROD disk-based approach) |
 | `soil_types.ipynb`           | DEFRA Soil Structure Groups — county-wide and per-catchment soil-type fractional coverage                         |
 | `graph_with_nodes.ipynb`     | River network graph construction with node/edge attributes                                                        |
 | `river_graph_building.ipynb` | Building topological river graphs from flow-direction rasters                                                     |
+
+> The Met Office UKV 2 km rainfall pipeline (`download_rainfall.py`, `convert_rainfall.py`, `get_rainfall_for_polygon`, `MET_office_rainfall.ipynb`) has been removed from this branch in favour of the NIMROD disk-based approach above. It's preserved on the `met-office-rainfall-legacy` branch if needed again.

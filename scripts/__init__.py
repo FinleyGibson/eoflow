@@ -16,7 +16,6 @@ __all__ = [
     "delineate_catchment",
     # NIMROD rainfall
     "process_nimrod_local",
-    "consolidate_nimrod",
     # Sample preparation and feature extraction
     "prepare_samples",
     "extract_features",
@@ -27,8 +26,6 @@ __all__ = [
     "visualise_nimrod",
     "full_sample_flow",
     # Utilities
-    "convert_rainfall",
-    "download_rainfall",
     "run_api",
     "test_nimrod_rainfall",
 ]

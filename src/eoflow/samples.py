@@ -766,7 +766,7 @@ class Sample:
                   <nimrod_dir>/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
 
             * A **single consolidated** ``.nc`` file produced by
-              ``scripts/consolidate_nimrod.py``.
+              ``scripts/consolidate_nimrod.sh``.
 
         Returns
         -------
@@ -799,97 +799,6 @@ class Sample:
             start,
             end,
             nimrod_dir=nimrod_dir,
-        )
-        self.layers.rainfall = da
-        n_times = da.sizes.get("time", 0)
-        logger.info(
-            "Rainfall stored: %d timestep(s), grid %d × %d.",
-            n_times,
-            da.sizes.get("y", 0),
-            da.sizes.get("x", 0),
-        )
-        return da
-
-    def _compute_rainfall_metoffice_legacy(
-        self,
-        start: Union[str, datetime],
-        end: Union[str, datetime],
-        *,
-        download_dir: Optional[Union[str, Path]] = None,
-        res: int = 1000,
-        run_hour: Optional[int] = None,
-        workers: int = 4,
-    ) -> "xarray.DataArray":
-        """[Legacy] Download and extract Met Office UKV rainfall-rate data for the catchment.
-
-        .. deprecated::
-            Use :meth:`compute_rainfall` instead, which loads pre-processed
-            NIMROD 1 km composite data from disk rather than downloading
-            from the Met Office AWS S3 bucket.
-
-        Delegates to :func:`eoflow.rainfall.get_rainfall_for_polygon` and
-        stores the result in :attr:`layers.rainfall`.
-
-        Unlike the static layers (topography, slope, soil type), rainfall
-        data carries an explicit temporal dimension: the returned array has
-        shape ``(time, y, x)`` where ``time`` holds UTC timestamps at
-        15-minute intervals.
-
-        Parameters
-        ----------
-        start : str or datetime
-            Start of the time window (UTC, inclusive).  Either a
-            ``"YYYY-MM-DDTHH:MM"`` string or an aware
-            :class:`~datetime.datetime`.
-        end : str or datetime
-            End of the time window (UTC, inclusive).
-        download_dir : str or Path, optional
-            Directory for caching downloaded ``*.nc`` files.  Pass an
-            explicit path to avoid re-downloading on repeated calls.  When
-            ``None``, a temporary directory is used and cleaned up
-            automatically.
-        res : int
-            Output BNG grid resolution in metres (default: 1000 m).
-        run_hour : int or None
-            Restrict to files from the model run starting at this UTC hour
-            (0–23).  ``None`` (default) uses all available runs.
-        workers : int
-            Number of parallel download threads (default: 4).
-
-        Returns
-        -------
-        xarray.DataArray
-            Rainfall rate in mm/h with dimensions ``(time, y, x)``, CRS
-            EPSG:27700.  Also stored in ``self.layers.rainfall``.
-
-        Raises
-        ------
-        ValueError
-            If the sample has no delineated catchment polygon, or if *end*
-            precedes *start*.
-        """
-        from eoflow.rainfall import get_rainfall_for_polygon
-
-        if not self.has_catchment:
-            raise ValueError(
-                f"Sample '{self.id}' has no catchment polygon. "
-                "Run delineate() first, or load a dataset that includes catchments."
-            )
-
-        logger.info(
-            "Fetching rainfall for site '%s' (%s → %s) …",
-            self.site_name,
-            start,
-            end,
-        )
-        da = get_rainfall_for_polygon(
-            self.catchment,
-            start,
-            end,
-            download_dir=download_dir,
-            res=res,
-            run_hour=run_hour,
-            workers=workers,
         )
         self.layers.rainfall = da
         n_times = da.sizes.get("time", 0)
