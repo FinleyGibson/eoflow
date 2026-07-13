@@ -93,9 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_NIMROD_DIR,
         metavar="DIR",
         help=(
-            "Path to NIMROD data: either a directory of per-timestep NetCDF files "
-            "(as produced by process_nimrod_local.py) or a single consolidated .nc file. "
-            "Omit --rainfall-days to skip rainfall."
+            "Path to NIMROD data: a directory of per-timestep NetCDF files (as "
+            "produced by process_nimrod_local.py), a directory of per-day NetCDF "
+            "files (as produced by consolidate_nimrod.sh), or a single .nc file "
+            "covering an arbitrary range. Omit --rainfall-days to skip rainfall."
         ),
     )
     p.add_argument(

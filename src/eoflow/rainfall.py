@@ -169,15 +169,20 @@ def get_nimrod_rainfall_for_polygon(
     end :
         End of the valid-time range (UTC, inclusive).
     nimrod_dir :
-        Path to the NIMROD data on disk.  Either:
+        Path to the NIMROD data on disk.  Any of:
 
         * A **directory** of per-timestep NetCDF files in the layout
           produced by :func:`process_nimrod_local`::
 
               <nimrod_dir>/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
 
-        * A **single consolidated** ``.nc`` file produced by
-          ``scripts/consolidate_nimrod.sh``.
+        * A **directory** of per-day NetCDF files produced by
+          ``scripts/consolidate_nimrod.sh``::
+
+              <nimrod_dir>/{year}/{YYYYMMDD}.nc
+
+        * A **single file** covering an arbitrary range (e.g. a whole year
+          merged with ``ncrcat``).
     parallel :
         If ``True``, open the per-timestep files concurrently via
         ``dask.delayed`` (faster for large time ranges, but may cause
@@ -266,13 +271,9 @@ def get_nimrod_rainfall_for_polygon(
             # Single consolidated .nc file
             logger.info("Opening consolidated NIMROD file: %s", nimrod_path.name)
             ds = xr.open_dataset(nimrod_path, chunks={"time": 288})
-            # Slice to the requested time window
-            if "time" in ds.coords:
-                t0 = np.datetime64(start.replace(tzinfo=None), "ns")
-                t1 = np.datetime64(end.replace(tzinfo=None), "ns")
-                ds = ds.sel(time=slice(t0, t1))
         else:
-            # Directory of per-timestep files produced by process_nimrod_local
+            # Directory of either per-timestep files (process_nimrod_local) or
+            # per-day consolidated files (scripts/consolidate_nimrod.sh).
             # find_nimrod_nc_files expects naive datetimes (file stems have no tz)
             start_naive = start.replace(tzinfo=None)
             end_naive = end.replace(tzinfo=None)
@@ -300,6 +301,16 @@ def get_nimrod_rainfall_for_polygon(
                 compat="override",
                 coords="minimal",
             )
+
+        # Slice to the requested time window. This is required (not just an
+        # optimisation): per-day files can only be filtered by
+        # find_nimrod_nc_files at day granularity, so a requested window
+        # starting or ending mid-day would otherwise pull in whole extra
+        # days of data.
+        if "time" in ds.coords:
+            t0 = np.datetime64(start.replace(tzinfo=None), "ns")
+            t1 = np.datetime64(end.replace(tzinfo=None), "ns")
+            ds = ds.sel(time=slice(t0, t1))
     except Exception as exc:
         logger.error("Failed to load NIMROD data from %s: %s", nimrod_path, exc, exc_info=True)
         return _empty_da
@@ -962,8 +973,12 @@ def find_nimrod_nc_files(
 ) -> tuple[list[Path], int]:
     """Return sorted ``.nc`` paths under *input_dir*, optionally date-filtered.
 
-    Files are expected to have stems of the form ``YYYYMMDD_HHMMSS``.  Any
-    file whose stem cannot be parsed is always included.
+    Files are expected to have stems of the form ``YYYYMMDD_HHMMSS``
+    (per-timestep, written by :func:`process_nimrod_local`) or ``YYYYMMDD``
+    (per-day, written by ``scripts/consolidate_nimrod.sh``) — a ``YYYYMMDD``
+    stem is treated as covering the whole day when checking overlap with
+    *start*/*end*, since the file itself may hold timesteps anywhere in that
+    day. Any file whose stem matches neither format is always included.
 
     Parameters
     ----------
@@ -988,10 +1003,15 @@ def find_nimrod_nc_files(
     for f in all_files:
         try:
             dt = datetime.strptime(f.stem, "%Y%m%d_%H%M%S")
+            interval_end = dt
         except ValueError:
-            matched.append(f)
-            continue
-        if start is not None and dt < start:
+            try:
+                dt = datetime.strptime(f.stem, "%Y%m%d")
+                interval_end = dt + timedelta(days=1) - timedelta(microseconds=1)
+            except ValueError:
+                matched.append(f)
+                continue
+        if start is not None and interval_end < start:
             skipped += 1
             continue
         if end is not None and dt > end:

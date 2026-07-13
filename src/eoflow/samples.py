@@ -758,15 +758,20 @@ class Sample:
         end : str or datetime
             End of the time window (UTC, inclusive).
         nimrod_dir : str or Path
-            Path to the NIMROD data on disk.  Either:
+            Path to the NIMROD data on disk.  Any of:
 
             * A **directory** of per-timestep NetCDF files in the layout
               produced by ``scripts/process_nimrod_local.py``::
 
                   <nimrod_dir>/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
 
-            * A **single consolidated** ``.nc`` file produced by
-              ``scripts/consolidate_nimrod.sh``.
+            * A **directory** of per-day NetCDF files produced by
+              ``scripts/consolidate_nimrod.sh``::
+
+                  <nimrod_dir>/{year}/{YYYYMMDD}.nc
+
+            * A **single file** covering an arbitrary range (e.g. a whole
+              year merged with ``ncrcat``).
 
         Returns
         -------

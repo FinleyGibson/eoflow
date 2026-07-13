@@ -10,12 +10,14 @@ This module tests:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pytest
+import xarray as xr
 
-from eoflow.rainfall import find_nimrod_nc_files, parse_datetime
+from eoflow.rainfall import find_nimrod_nc_files, get_nimrod_rainfall_for_polygon, parse_datetime
 
 # ---------------------------------------------------------------------------
 # Test parse_datetime
@@ -140,6 +142,99 @@ class TestFindNimrodNcFiles:
 
         assert [f.name for f in files] == ["not_a_timestamp.nc"]
         assert n_skipped == 0
+
+    def test_day_stem_kept_when_day_overlaps_range(self, tmp_path):
+        """A YYYYMMDD (per-day, consolidate_nimrod.sh) file overlapping the window is kept."""
+        self._touch(tmp_path, "20210102.nc")
+
+        files, n_skipped = find_nimrod_nc_files(
+            tmp_path,
+            # Window starts mid-day on the 2nd -- the day file still overlaps it.
+            start=datetime(2021, 1, 2, 12, 0),
+            end=datetime(2021, 1, 3),
+        )
+
+        assert [f.name for f in files] == ["20210102.nc"]
+        assert n_skipped == 0
+
+    def test_day_stem_skipped_when_day_outside_range(self, tmp_path):
+        """A per-day file entirely outside the window is skipped."""
+        self._touch(tmp_path, "20210101.nc")
+        self._touch(tmp_path, "20210105.nc")
+
+        files, n_skipped = find_nimrod_nc_files(
+            tmp_path,
+            start=datetime(2021, 1, 3),
+            end=datetime(2021, 1, 4),
+        )
+
+        assert files == []
+        assert n_skipped == 2
+
+
+# ---------------------------------------------------------------------------
+# Test get_nimrod_rainfall_for_polygon
+# ---------------------------------------------------------------------------
+
+
+class TestGetNimrodRainfallForPolygonDayFiles:
+    """Regression tests for loading from a directory of per-day consolidated files.
+
+    Per-day files can only be filtered by find_nimrod_nc_files at day
+    granularity, so get_nimrod_rainfall_for_polygon must also slice to the
+    exact requested window after loading -- otherwise a window starting or
+    ending mid-day would silently pull in whole extra days of data.
+    """
+
+    def _write_day_file(self, nimrod_dir: Path, day: datetime, xs, ys) -> None:
+        times = [day + timedelta(hours=h) for h in (0, 6, 12, 18)]
+        data = np.random.rand(len(times), len(ys), len(xs)).astype("float32")
+        ds = xr.Dataset(
+            {
+                "rainfall_rate": (
+                    ("time", "projection_y_coordinate", "projection_x_coordinate"),
+                    data,
+                )
+            },
+            coords={
+                "time": times,
+                "projection_y_coordinate": ys,
+                "projection_x_coordinate": xs,
+            },
+        )
+        year_dir = nimrod_dir / str(day.year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        ds.to_netcdf(year_dir / f"{day.strftime('%Y%m%d')}.nc")
+
+    def test_mid_day_window_excludes_out_of_range_timesteps(self, tmp_path):
+        """A window starting mid-day-1 and ending before day-2 should return exactly 2 steps."""
+        from pyproj import Transformer
+        from shapely.geometry import box
+        from shapely.ops import transform as shapely_transform
+
+        # Small polygon over Devon, reprojected to BNG to size the synthetic grid.
+        polygon = box(-3.55, 50.70, -3.45, 50.80)
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
+        polygon_bng = shapely_transform(transformer.transform, polygon)
+        x_min, y_min, x_max, y_max = polygon_bng.bounds
+
+        xs = np.arange(x_min - 2000, x_max + 2000, 1000.0)
+        ys = np.arange(y_min - 2000, y_max + 2000, 1000.0)
+
+        nimrod_dir = tmp_path / "nimrod"
+        self._write_day_file(nimrod_dir, datetime(2021, 1, 1), xs, ys)
+        self._write_day_file(nimrod_dir, datetime(2021, 1, 2), xs, ys)
+
+        da = get_nimrod_rainfall_for_polygon(
+            polygon,
+            "2021-01-01T12:00",
+            "2021-01-01T23:00",
+            nimrod_dir=nimrod_dir,
+        )
+
+        assert da.sizes["time"] == 2
+        result_times = [str(t)[:16] for t in da.time.values]
+        assert result_times == ["2021-01-01T12:00", "2021-01-01T18:00"]
 
 
 # ---------------------------------------------------------------------------

@@ -126,7 +126,7 @@ CEDA_TOKEN=your_token_here
     - _(optional)_ Fetches NDVI / NDWI from Sentinel-2 via openEO (`--skip-eo` to omit)
     - Saves each fully-populated `Sample` to disk → `data/sample_instances/<notation>/`
 
-    `--nimrod-dir` accepts either the raw per-timestep directory tree (step 6's output) or a single consolidated `.nc` file (step 7's output) — consolidation is a speed optimisation, not a requirement.
+    `--nimrod-dir` accepts the raw per-timestep directory tree (step 6's output), the per-day consolidated directory tree (step 7's output), or a single `.nc` file covering an arbitrary range (e.g. a whole year merged with `ncrcat`) — consolidation is a speed optimisation, not a requirement.
 
     ```
     python -m scripts.prepare_samples \
