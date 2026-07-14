@@ -27,9 +27,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pandas as pd
-
-from eoflow.features import extract_features_batch
+from eoflow.features import extract_features_batch, print_feature_summary
 from eoflow.log_utils import get_logger
 from eoflow.utils import DATA_DIR, PROJECT_ROOT
 
@@ -158,54 +156,7 @@ def main(argv: list[str] | None = None) -> None:
             )
 
     # ── Summary report ───────────────────────────────────────────────────
-    _print_summary(df, args.output)
-
-
-def _print_summary(df: pd.DataFrame, output_path: Path) -> None:
-    """Print a human-readable summary of the extracted feature matrix."""
-    numeric = df.select_dtypes(include="number")
-    n_nan = numeric.isna().sum()
-    n_complete = (n_nan == 0).sum()
-
-    sep = "─" * 60
-    print(f"\n{sep}")
-    print(f"  Feature matrix: {df.shape[0]} samples × {df.shape[1]} columns")
-    print(f"  Numeric columns : {len(numeric.columns)}")
-    print(f"  Fully populated : {n_complete} / {len(numeric.columns)} columns")
-    print(f"  Output          : {output_path}")
-    print(sep)
-
-    # Feature-group breakdown
-    groups = {
-        "Identity / target": [
-            "notation",
-            "site_name",
-            "date",
-            "result",
-            "unit",
-            "flow_acc_at_pour_point_log",
-        ],
-        "Geometry": [c for c in df.columns if c.startswith("catchment_")],
-        "Terrain": [c for c in df.columns if c.startswith(("elevation_", "slope_", "aspect_"))],
-        "NDVI": [c for c in df.columns if c.startswith("ndvi_")],
-        "NDWI": [c for c in df.columns if c.startswith("ndwi_")],
-        "Soil": [c for c in df.columns if c.startswith("soil_")],
-        "Rainfall": [c for c in df.columns if c.startswith("rainfall_")],
-        "Interactions": [c for c in df.columns if c.startswith("interaction_")],
-    }
-    print("\n  Columns by group:")
-    for group_name, cols in groups.items():
-        present = [c for c in cols if c in df.columns]
-        print(f"    {group_name:<22} {len(present):3d} cols")
-    print()
-
-    # Sample row (first row, numeric only)
-    if not df.empty:
-        row0 = numeric.iloc[0].dropna()
-        print("  Sample row (first, non-NaN values):")
-        for col, val in row0.items():
-            print(f"    {col:<45s} {val:.6g}")
-    print(sep)
+    print_feature_summary(df, args.output)
 
 
 if __name__ == "__main__":

@@ -1752,7 +1752,10 @@ class Sample:
         root.mkdir(parents=True, exist_ok=True)
 
         # 1. Observation-row metadata
-        (root / "metadata.json").write_text(self._row.to_json() or "", encoding="utf-8")
+        # `geometry` (a live shapely object) isn't JSON-serialisable and the
+        # catchment polygon is already saved separately as catchment.wkt below.
+        row_to_save = self._row.drop(labels=["geometry"], errors="ignore")
+        (root / "metadata.json").write_text(row_to_save.to_json() or "", encoding="utf-8")
         logger.debug("Saved metadata to %s", root / "metadata.json")
 
         # 2. Catchment geometry

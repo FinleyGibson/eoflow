@@ -663,3 +663,105 @@ def extract_features_batch(
     df = pd.DataFrame(rows).reset_index(drop=True)
     logger.info("Batch extraction complete: %d rows × %d columns.", *df.shape)
     return df
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+#: Column-name prefixes belonging to each feature group, for reporting.
+#: "Identity / target" is matched by exact name rather than prefix, since
+#: those columns don't share a common prefix.
+FEATURE_GROUPS: dict[str, tuple[str, ...]] = {
+    "Identity / target": (
+        "notation", "site_name", "date", "result", "unit", "flow_acc_at_pour_point_log",
+    ),
+    "Geometry": ("catchment_",),
+    "Terrain": ("elevation_", "slope_", "aspect_"),
+    "NDVI": ("ndvi_",),
+    "NDWI": ("ndwi_",),
+    "Soil": ("soil_",),
+    "Rainfall": ("rainfall_",),
+    "Interactions": ("interaction_",),
+}
+
+
+def _group_columns(columns, group_name: str) -> list:
+    """Columns of *columns* belonging to *group_name* per :data:`FEATURE_GROUPS`."""
+    spec = FEATURE_GROUPS[group_name]
+    if group_name == "Identity / target":
+        return [c for c in spec if c in columns]
+    return [c for c in columns if c.startswith(spec)]
+
+
+def summarize_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-group column counts and NaN-completeness for a features DataFrame.
+
+    Parameters
+    ----------
+    df:
+        A features DataFrame as returned by :func:`extract_features_batch`
+        (or an equivalent CSV/Parquet loaded back from disk).
+
+    Returns
+    -------
+    pd.DataFrame
+        Indexed by group name (see :data:`FEATURE_GROUPS`), with columns:
+
+        - ``n_cols``       — numeric columns present for that group
+        - ``n_complete``   — of those, how many have zero NaNs
+        - ``completeness`` — mean fraction of non-NaN cells across the
+          group's numeric columns (NaN if the group has no columns)
+    """
+    numeric = df.select_dtypes(include="number")
+    rows = []
+    for group_name in FEATURE_GROUPS:
+        cols = [c for c in _group_columns(df.columns, group_name) if c in numeric.columns]
+        if cols:
+            completeness = float(numeric[cols].notna().mean().mean())
+            n_complete = int((numeric[cols].isna().sum() == 0).sum())
+        else:
+            completeness = float("nan")
+            n_complete = 0
+        rows.append(
+            {"group": group_name, "n_cols": len(cols), "n_complete": n_complete, "completeness": completeness}
+        )
+    return pd.DataFrame(rows).set_index("group")
+
+
+def print_feature_summary(df: pd.DataFrame, output_path: Optional[Path] = None) -> None:
+    """Print a human-readable summary of an extracted feature matrix.
+
+    Parameters
+    ----------
+    df:
+        A features DataFrame as returned by :func:`extract_features_batch`.
+    output_path:
+        If given, printed in the header for context (e.g. the CSV path the
+        DataFrame was just saved to, or loaded from).
+    """
+    numeric = df.select_dtypes(include="number")
+    n_nan = numeric.isna().sum()
+    n_complete_cols = (n_nan == 0).sum()
+
+    sep = "─" * 60
+    print(f"\n{sep}")
+    print(f"  Feature matrix: {df.shape[0]} samples × {df.shape[1]} columns")
+    print(f"  Numeric columns : {len(numeric.columns)}")
+    print(f"  Fully populated : {n_complete_cols} / {len(numeric.columns)} columns")
+    if output_path is not None:
+        print(f"  Output          : {output_path}")
+    print(sep)
+
+    print("\n  Columns by group:")
+    for group_name in FEATURE_GROUPS:
+        n_present = len(_group_columns(df.columns, group_name))
+        print(f"    {group_name:<22} {n_present:3d} cols")
+    print()
+
+    if not df.empty:
+        row0 = numeric.iloc[0].dropna()
+        print("  Sample row (first, non-NaN values):")
+        for col, val in row0.items():
+            print(f"    {col:<45s} {val:.6g}")
+    print(sep)
