@@ -14,7 +14,7 @@ The two main source streams — EA water quality samples and NIMROD rainfall —
 
     > _Optional QA:_ `visualise_dem.py` — render the DEM as an interactive map to check coverage before proceeding
 
-- **Study-area shapefile** — a polygon boundary for your area of interest, used by `nimrod_process_local.py` (to crop rainfall) and `ge_ea_water_quality_by_shapefile.py` (to filter samples). Administrative boundaries can be downloaded from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/), or one has been provided for the East Devon case study area of interest.
+- **Study-area shapefile** — a polygon boundary for your area of interest, used by `nimrod_process_local.py` (to crop rainfall) and `get_ea_water_quality_by_shapefile.py` (to filter samples). Administrative boundaries can be downloaded from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/), or one has been provided for the East Devon case study area of interest.
 - **CEDA credentials** — a `CEDA_TOKEN` env var is required for NIMROD downloads (Stream B) and can be created at [ceda.ac.uk](https://accounts.ceda.ac.uk/realms/ceda/account/#/).
 - **Copernicus Data Space account** — a free account at [dataspace.copernicus.eu](https://dataspace.copernicus.eu) is required for Sentinel-2 EO data; authentication is via OIDC device-flow (interactive browser prompt) triggered automatically by `prepare_samples.py` unless `--skip-eo` is passed
 
@@ -31,13 +31,18 @@ CEDA_TOKEN=your_token_here
 
 ## Stream A — EA Water Quality Samples
 
-1. **`get_ea_water_quality.py`** _(or `ge_ea_water_quality_by_shapefile.py` to filter by geography)_
+1. **`get_ea_water_quality.py`** _(or `get_ea_water_quality_by_shapefile.py` to filter by geography)_
    Download water quality observations from the EA API → raw CSV
 
 2. **`convert_ea_csv.py`**
    Clean the raw CSV: rename columns, pivot determinands, add WGS-84 lat/lon → clean CSV
 
     > _Optional QA:_ `visualise_ea_samples.py` — plot sampling locations on an interactive map to check spatial coverage and distribution of values
+    >
+    > `sample_report.py` — print quick summary stats (row count, unique locations, date/lat/lon coverage) for a samples CSV:
+    > ```
+    > python -m scripts.sample_report data/ea_water_quality/turbidity_clean.csv
+    > ```
 
 3. **`delineate_catchments.py`** — _needs: clean CSV + DEM_
    For each unique sampling location: snap to the nearest stream, run pysheds D8 delineation, and store the catchment polygon → GeoPackage (`.gpkg`)
@@ -47,12 +52,25 @@ CEDA_TOKEN=your_token_here
 
     ```
     python -m scripts.delineate_catchments \
-        --csv  data/ea_samples.csv \
-        --dem  data/dems/dem.tif \
-        --out  outputs/catchments.gpkg
+        --csv  data/ea_water_quality/turbidity_clean.csv \
+        --dem  data/dems/devon_dem_cop30.tif \
+        --out  data/delineated_catchments/catchments.gpkg
     ```
 
     > _Optional QA:_ `visualise_devon_catchments.py` — overlay the delineated catchment polygons, DEM, drainage network, and sample points on an interactive map to verify delineation quality
+    >
+    > `gpkg_report.py` — print summary stats (row/site/date counts, delineation success rate) for a delineated GeoPackage and plot per-site sample-date violin plots:
+    > ```
+    > python -m scripts.gpkg_report data/delineated_catchments/catchments.gpkg
+    > ```
+
+    > _Optional downsampling:_ `downsample_gpkg.py` — reduce a large delineated GeoPackage to a smaller, diverse subset (spread across sites and time) — useful for quick/cheap pipeline runs before committing to the full dataset:
+    > ```
+    > python -m scripts.downsample_gpkg \
+    >     --gpkg       data/delineated_catchments/catchments.gpkg \
+    >     --n-samples  1000 \
+    >     --output     data/delineated_catchments/catchments_1000.gpkg
+    > ```
 
 ---
 
@@ -87,6 +105,8 @@ CEDA_TOKEN=your_token_here
     NIMROD files store `time`, `forecast_reference_time`, and `forecast_period` as **scalar** coordinates rather than a record dimension, so a naive `ncrcat`/`cdo mergetime` either fails outright or (worse) silently keeps only one timestep. This script instead stacks each day's files with `ncecat` and repairs the time coordinates from the timestamps encoded in the filenames.
 
     > An earlier `xarray`/`dask`-based merge (`consolidate_nimrod.py`) has been removed: its `open_mfdataset(parallel=True)` approach did not finish in practice on the full multi-year archive (tens of thousands of small per-timestep files) — it also turns out to be unsafe at any file count, since `xarray`'s file-handle cache isn't thread-safe.
+
+    > `ncecat` requires every input file for a day to share the same variable set; if a raw per-timestep file is missing an expected variable (schema drift somewhere upstream — seen in practice for at least one 2024 file missing `transverse_mercator`), that day fails with `nco_inq_varid(): ... is not defined in file` and the run stops rather than silently skipping it. Rerunning with `-f` after removing/fixing the offending file resumes from there.
 
     ```
     # Merge one year
@@ -130,12 +150,14 @@ CEDA_TOKEN=your_token_here
 
     ```
     python -m scripts.prepare_samples \
-        --gpkg          outputs/catchments.gpkg \
-        --dem           data/dems/dem.tif \
-        --nimrod-dir    data/nimrod_processed/raw \
+        --gpkg          data/delineated_catchments/catchments.gpkg \
+        --dem           data/dems/devon_dem_cop30.tif \
+        --nimrod-dir    data/nimrod_processed/concatenated/2020 \
         --rainfall-days 10 \
         --eo-days       30
     ```
+
+    openEO authentication is non-interactive (no browser prompt) when `OPENEO_AUTH_CLIENT_ID`/`OPENEO_AUTH_CLIENT_SECRET` are set in `.env` — useful on a headless/remote machine, since the device-flow prompt described in Prerequisites otherwise needs an interactive browser.
 
 ---
 
@@ -145,6 +167,7 @@ CEDA_TOKEN=your_token_here
 | ------------------------- | ----------------------------------------------------------------------------------------------- | ------------- |
 | `test_nimrod_rainfall.py` | Smoke-test: load one sample, pull rainfall from disk, print statistics                          | stdout        |
 | `extract_features.py`     | Batch feature extraction across all saved samples                                               | CSV / Parquet |
+| `feature_report.py`       | _(Optional QA)_ Summary stats + per-group data-completeness bar chart for an extracted-features CSV | stdout + PNG  |
 | `full_sample_flow.py`     | _(Optional QA)_ Visualise all layers for one sample as static subplots + interactive Folium map | PNG + HTML    |
 
 ---
