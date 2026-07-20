@@ -32,6 +32,17 @@ if [ -z "$CEDA_TOKEN" ]; then
     exit 1
 fi
 
+# Fail fast rather than discovering an expired token after a long mirror run:
+# CEDA tokens are short-lived, so re-check before every download, not just once
+# per session. A rejected/expired token gets served back as an HTML login page
+# (200 OK, not 401), which wget happily saves as if it were the real file.
+AUTH_CHECK="$(dirname "$0")/nimrod_authentication_check.sh"
+if [ -x "$AUTH_CHECK" ] && ! "$AUTH_CHECK" >/dev/null 2>&1; then
+    echo "Error: CEDA_TOKEN failed authentication check. Refresh it at" >&2
+    echo "  https://accounts.ceda.ac.uk/realms/ceda/account/#/ and update .env" >&2
+    exit 1
+fi
+
 YEAR="$1"
 TARGET_DIR="$2"
 URL="https://dap.ceda.ac.uk/badc/ukmo-nimrod/data/composite/uk-1km/$YEAR/"
@@ -51,3 +62,33 @@ wget \
     -P "$TARGET_DIR" \
     --header "Authorization: Bearer $CEDA_TOKEN" \
     "$URL"
+
+# The token can also expire mid-mirror (this run may take 10+ minutes for a
+# full year). A lapsed token makes CEDA redirect to an HTML sign-in page,
+# which wget follows and silently saves under the original .tar filename -
+# same failure mode as an expired token at start, just discovered later.
+# Validate every downloaded tar so this is caught here instead of surfacing
+# as a confusing failure several pipeline steps downstream.
+echo ""
+echo "Verifying downloaded tar files..."
+bad_files=""
+for f in $(find "$TARGET_DIR" -name "*.tar"); do
+    if ! tar -tf "$f" >/dev/null 2>&1; then
+        bad_files="$bad_files$f
+"
+    fi
+done
+
+if [ -n "$bad_files" ]; then
+    bad_count=$(printf '%s' "$bad_files" | grep -c .)
+    echo "Error: $bad_count downloaded file(s) are not valid tar archives" >&2
+    echo "(likely an expired CEDA_TOKEN mid-download - CEDA serves an HTML" >&2
+    echo "login page in place of the file, which wget saves under the" >&2
+    echo "original name). Removing them; refresh CEDA_TOKEN and rerun:" >&2
+    printf '%s' "$bad_files" | while IFS= read -r f; do
+        [ -n "$f" ] && echo "  $f" >&2 && rm -f "$f"
+    done
+    exit 1
+fi
+
+echo "All downloaded tar files verified OK."
