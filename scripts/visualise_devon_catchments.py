@@ -438,6 +438,8 @@ def visualise(
     show_flow_acc: bool = True,
     flow_acc_threshold: int = 100,
     flow_acc_opacity: float = 0.7,
+    unique_catchments: bool = False,
+    show_catchments: bool = False,
 ) -> Path:
     """Build an interactive map and open it in the browser.
 
@@ -471,6 +473,18 @@ def visualise(
     flow_acc_opacity : float
         Overall opacity of the flow-accumulation layer (0–1).
         Defaults to ``0.7``.
+    unique_catchments : bool
+        A GeoPackage may contain many rows per sampling point (one per
+        sample date), which repeatedly delineate the same catchment. When
+        ``True``, keep only the first row per distinct catchment geometry
+        so each catchment is drawn (and its marker placed) once. Defaults
+        to ``False`` (show every row).
+    show_catchments : bool
+        When ``True``, draw every catchment polygon immediately in a
+        toggleable "Catchments" layer-control group. When ``False``
+        (default), catchments are hidden until you click their sample
+        marker — better suited to a large, un-deduplicated GeoPackage where
+        showing every polygon at once would be unreadable.
 
     Returns
     -------
@@ -497,6 +511,19 @@ def visualise(
 
     gdf["_value"] = pd.to_numeric(gdf[value_col], errors="coerce")
     plot_gdf = gdf.dropna(subset=["latitude", "longitude", "_value"]).copy()
+
+    if unique_catchments and not plot_gdf.empty:
+        dedup_key = "__catchment_wkt" if "__catchment_wkt" in plot_gdf.columns else None
+        if dedup_key is not None:
+            dedup_values = plot_gdf[dedup_key]
+        else:
+            dedup_values = plot_gdf.geometry.apply(lambda g: g.wkb if g is not None else None)
+        n_before = len(plot_gdf)
+        plot_gdf = plot_gdf.loc[~dedup_values.duplicated()].copy()
+        logger.info(
+            "Deduplicated to unique catchments: %d → %d rows (keyed on %s)",
+            n_before, len(plot_gdf), dedup_key or "geometry",
+        )
 
     if plot_gdf.empty:
         raise ValueError("No plottable rows remain after dropping NaN lat/lon/values.")
@@ -687,13 +714,20 @@ def visualise(
             logger.warning("Could not load boundary: %s", exc)
 
     # ------------------------------------------------------------------
-    # 6. Catchment polygons (hidden by default, revealed on marker click)
+    # 6. Catchment polygons
     # ------------------------------------------------------------------
-    # Each catchment polygon is added directly to the map with `show=False`
-    # so Leaflet creates the layer but does not display it initially, and
-    # `control=False` so it doesn't clutter the layer-control list. A click
-    # handler (added in section 7) toggles the corresponding layer on/off.
+    # Two modes:
+    #   show_catchments=True  — all polygons are drawn immediately in a
+    #       toggleable "Catchments" layer-control group. Best when the
+    #       count is manageable (e.g. after --unique-catchments).
+    #   show_catchments=False — each polygon is added directly to the map
+    #       with `show=False` (Leaflet creates the layer but doesn't
+    #       display it) and `control=False` (kept out of the layer-control
+    #       list). A click handler (added in section 7) toggles the
+    #       corresponding layer on/off — better when there are too many
+    #       catchments to usefully show at once.
     catchment_layer_names: dict[object, str] = {}
+    catchment_fg = folium.FeatureGroup(name="Catchments", show=True) if show_catchments else None
 
     for idx, row in plot_gdf.iterrows():
         geom = row.geometry
@@ -722,11 +756,17 @@ def visualise(
                 "fillOpacity": 0.45,
             },
             tooltip=f"{name}: {value_col}={val}",
-            show=False,
+            show=show_catchments,
             control=False,
         )
-        catchment_layer.add_to(m)
-        catchment_layer_names[idx] = catchment_layer.get_name()
+        if catchment_fg is not None:
+            catchment_layer.add_to(catchment_fg)
+        else:
+            catchment_layer.add_to(m)
+            catchment_layer_names[idx] = catchment_layer.get_name()
+
+    if catchment_fg is not None:
+        catchment_fg.add_to(m)
 
     # ------------------------------------------------------------------
     # 7. Sample point markers and snap-offset lines
@@ -1045,6 +1085,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.7,
         help="Opacity of the flow-accumulation overlay (0–1). Default: 0.7.",
     )
+    p.add_argument(
+        "--unique-catchments",
+        action="store_true",
+        help=(
+            "Show each distinct catchment once, instead of once per row. Useful when "
+            "the GeoPackage has multiple sample dates per site (same catchment repeated)."
+        ),
+    )
+    p.add_argument(
+        "--show-catchments",
+        action="store_true",
+        help=(
+            "Draw every catchment polygon immediately in a toggleable layer group, "
+            "instead of only revealing one at a time via marker click. Best combined "
+            "with --unique-catchments so the polygon count stays readable."
+        ),
+    )
     return p.parse_args(argv)
 
 
@@ -1079,6 +1136,8 @@ def main(argv: list[str] | None = None) -> None:
             show_flow_acc=args.show_flow_acc,
             flow_acc_threshold=args.flow_acc_threshold,
             flow_acc_opacity=args.flow_acc_opacity,
+            unique_catchments=args.unique_catchments,
+            show_catchments=args.show_catchments,
         )
     except Exception as exc:
         logger.error("Fatal error: %s", exc, exc_info=True)
