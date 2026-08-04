@@ -2,22 +2,22 @@
 # Process all locally downloaded NIMROD tar files for every year found in
 # data/nimrod_raw/.
 #
-# For each nimrod_YYYY sub-directory the script calls nimrod_process_local.py,
+# For each YYYY sub-directory the script calls nimrod_process_local.py,
 # which unpacks the tar files, crops to the shapefile, and writes per-timestep
-# NetCDF files under data/nimrod_processed/YYYY/.
+# NetCDF files under data/nimrod_processed/raw/YYYY/.
 #
 # Usage:
 #   bash scripts/process_all_nimrod.sh
 #
 # Optional environment variables:
 #   SHAPEFILE   - path to shapefile (default: data/shapefiles/devon_county/devon_county.shp)
-#   OUTPUT_DIR  - root output directory  (default: data/nimrod_processed)
+#   OUTPUT_DIR  - root output directory  (default: data/nimrod_processed/raw)
 #   WORKERS     - number of parallel worker threads (default: let the script decide)
 
 set -euo pipefail
 
 SHAPEFILE="${SHAPEFILE:-./data/shapefiles/devon_county/devon_county.shp}"
-OUTPUT_DIR="${OUTPUT_DIR:-./data/nimrod_processed}"
+OUTPUT_DIR="${OUTPUT_DIR:-./data/nimrod_processed/raw}"
 WORKERS="${WORKERS:-}"
 
 RAW_DIR="./data/nimrod_raw"
@@ -33,10 +33,10 @@ if [ ! -d "$RAW_DIR" ]; then
 fi
 
 # Collect year directories, sorted oldest-first
-YEAR_DIRS=($(ls -d "${RAW_DIR}"/nimrod_* 2>/dev/null | sort))
+YEAR_DIRS=($(ls -d "${RAW_DIR}"/*/ 2>/dev/null | sort))
 
 if [ ${#YEAR_DIRS[@]} -eq 0 ]; then
-    echo "No nimrod_* directories found in ${RAW_DIR}." >&2
+    echo "No year directories found in ${RAW_DIR}." >&2
     exit 1
 fi
 
@@ -46,7 +46,7 @@ if [ -n "$WORKERS" ]; then
 fi
 
 for YEAR_DIR in "${YEAR_DIRS[@]}"; do
-    YEAR=$(basename "$YEAR_DIR" | sed 's/nimrod_//')
+    YEAR=$(basename "$YEAR_DIR")
     YEAR_OUTPUT="${OUTPUT_DIR}/${YEAR}"
 
     echo "=========================================="

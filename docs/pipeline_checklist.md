@@ -38,7 +38,7 @@ python -m scripts.visualise_dem
 - [x] Convert and clean the raw EA CSV (`convert_ea_csv.py`) — `data/ea_water_quality/turbidity_2010-01_2026-06_clean.csv`
 - [ ] (Optional) Verify sample locations (`visualise_ea_samples.py`)
 - [x] Delineate catchments (`delineate_catchments.py`) — `data/delineated_catchments/devon_turbidity_sites_2010-10_2026-06.gpkg` (4189 rows, all delineated)
-- [ ] (Optional) Inspect delineation quality (`visualise_devon_catchments.py`)
+- [ ] (Optional) Inspect delineation quality (`visualise_catchments.py`)
 - [x] (Optional) `gpkg_report.py` / `downsample_gpkg.py` used to QA and produce smaller working subsets — `..._1000.gpkg` (1000-sample general subset) and `..._2020_sample5.gpkg` (5-sample, 2020-only, used for the Compute Sample Layers test run below)
 - [x] Transfer delineated GeoPackage to this machine
 

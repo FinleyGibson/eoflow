@@ -7,7 +7,7 @@ set -euo pipefail
 YEARS=(2025 2024 2023 2022 2021 2020 2019 2018 2017 2016)
 
 for YEAR in "${YEARS[@]}"; do
-    OUTPUT_DIR="./data/nimrod_${YEAR}"
+    OUTPUT_DIR="./data/nimrod_raw/${YEAR}"
     echo "=========================================="
     echo "Downloading NIMROD data for year: ${YEAR}"
     echo "Output directory: ${OUTPUT_DIR}"
