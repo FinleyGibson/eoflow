@@ -18,12 +18,12 @@ the default web browser.
 
 Usage
 -----
-    python -m scripts.visualise_devon_catchments \
+    python -m scripts.visualise_catchments \
         --gpkg data/water_quality_dataset.gpkg \
         --dem data/dem.tif
 
     # With all options
-    python -m scripts.visualise_devon_catchments \
+    python -m scripts.visualise_catchments \
         --gpkg data/water_quality_dataset.gpkg \
         --dem data/dem.tif \
         --shapefile data/study_area_boundary \

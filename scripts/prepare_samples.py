@@ -32,6 +32,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -169,7 +170,7 @@ def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
 
     # Lazy imports so --help is fast
-    from eoflow.samples import CatchmentDataset, Sample
+    from eoflow.samples import CatchmentDataset, CatchmentLayers, Sample
 
     set_level(logger, args.log_level)
 
@@ -220,7 +221,17 @@ def main(argv=None) -> None:
     n_failed = 0
 
     for i, sample in enumerate(ds):
-        tag = sample.notation or "sample_{:04d}".format(i)
+        # `notation` identifies the *site*, not the observation - the same site
+        # is typically sampled on many different dates, each with its own
+        # result/rainfall/EO window. Tag by site + observation so repeat visits
+        # don't collide and get silently skipped as "already exists".
+        obs_id = None
+        match = re.search(r"/sample/([^/]+)", sample.id)
+        if match:
+            obs_id = match.group(1)
+        tag = f"{sample.notation}_{obs_id}" if sample.notation and obs_id else (
+            sample.notation or "sample_{:04d}".format(i)
+        )
         out_dir = args.out_dir / tag
 
         # Skip if already saved
@@ -276,6 +287,13 @@ def main(argv=None) -> None:
             sample.save(out_dir)
             n_saved += 1
             logger.info("  saved %s", tag)
+
+            # CatchmentDataset keeps every Sample for the script's whole
+            # lifetime, so the computed layers (some are multi-hundred-MB
+            # EO cubes) would otherwise accumulate in memory across all
+            # 1000 samples until the process is OOM-killed. Nothing here is
+            # needed once saved, so drop it immediately.
+            sample.layers = CatchmentLayers()
 
         except Exception as exc:
             n_failed += 1

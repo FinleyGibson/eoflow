@@ -132,7 +132,7 @@ The map includes:
 - **Devon county boundary**
 
 ```shell
-python -m scripts.visualise_devon_catchments \
+python -m scripts.visualise_catchments \
     --gpkg      data/devon_water_quality_dataset.gpkg \
     --dem       data/devon_dem.tif \
     --shapefile data/devon_county \

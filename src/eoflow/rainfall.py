@@ -1177,7 +1177,10 @@ def process_nimrod_local(
         if p.is_file() and p.suffix == ".tar":
             tar_files.append(p)
         elif p.is_dir():
-            tar_files.extend(p.glob("*.tar"))
+            # rglob, not glob: wget --mirror (used by nimrod_download_script.sh)
+            # nests tar files several directories deep rather than flat in the
+            # given directory, so a shallow glob silently finds nothing.
+            tar_files.extend(p.rglob("*.tar"))
 
     if not tar_files:
         logger.error("No tar files found in: %s", input_paths)

@@ -57,7 +57,7 @@ CEDA_TOKEN=your_token_here
         --out  data/delineated_catchments/catchments.gpkg
     ```
 
-    > _Optional QA:_ `visualise_devon_catchments.py` — overlay the delineated catchment polygons, DEM, drainage network, and sample points on an interactive map to verify delineation quality
+    > _Optional QA:_ `visualise_catchments.py` — overlay the delineated catchment polygons, DEM, drainage network, and sample points on an interactive map to verify delineation quality
     >
     > `gpkg_report.py` — print summary stats (row/site/date counts, delineation success rate) for a delineated GeoPackage and plot per-site sample-date violin plots:
     > ```
@@ -86,10 +86,20 @@ CEDA_TOKEN=your_token_here
     bash scripts/nimrod_download_script.sh 2023 data/nimrod_raw/2023
     ```
 
-    > _Convenience wrapper:_ `download_all_nimrod.sh` — loops the above over 2016–2025 into `data/nimrod_<year>/`
+    `wget --mirror` nests the downloaded tar files several directories deep
+    (e.g. `data/nimrod_raw/2023/dap.ceda.ac.uk/badc/ukmo-nimrod/data/composite/uk-1km/2023/*.tar`)
+    rather than flat in the given directory — this is expected, and step 6 finds
+    them regardless of depth.
+
+    The script also validates every downloaded tar and pre-flight-checks the
+    token before starting (`CEDA_TOKEN` is short-lived; a token valid at the
+    start of a multi-year run can expire partway through, which otherwise
+    surfaces as CEDA silently serving an HTML login page in place of the file).
+
+    > _Convenience wrapper:_ `download_all_nimrod.sh` — loops the above over 2016–2025 into `data/nimrod_raw/<year>/`
 
 6. **`nimrod_process_local.py`** — _needs: tar files + a shapefile for the study area_
-   Unpack each tar, crop every 5-minute timestep to the study-area boundary, write per-timestep NetCDF files:
+   Unpack each tar (found recursively under `--input`, at any depth), crop every 5-minute timestep to the study-area boundary, write per-timestep NetCDF files:
 
     ```
     data/nimrod_processed/raw/{year}/{YYYYMMDD}/{YYYYMMDD_HHMMSS}.nc
@@ -97,7 +107,7 @@ CEDA_TOKEN=your_token_here
 
     > _Optional QA:_ `visualise_nimrod.py` — overlay a single timestep or an aggregated (mean/max/sum) view of the processed NetCDF files on an interactive map to verify spatial coverage and values
 
-    > _Convenience wrapper:_ `process_all_nimrod.sh` — loops the above over every `nimrod_<year>` directory found under `data/nimrod_raw/`
+    > _Convenience wrapper:_ `process_all_nimrod.sh` — loops the above over every year directory found under `data/nimrod_raw/`, writing to `data/nimrod_processed/raw/<year>` by default
 
 7. **`consolidate_nimrod.sh`** _(optional)_
    Merge per-timestep files into per-day NetCDFs — faster for repeated loading across many samples, and required before a day's data can be opened as a single time series at all.
@@ -134,6 +144,13 @@ CEDA_TOKEN=your_token_here
     ncrcat data/nimrod_processed/concatenated/2023/*.nc data/nimrod_processed/concatenated/2023.nc
     ```
 
+    > **Disk retention:** once a year's raw per-timestep tree is confirmed fully
+    > represented in its consolidated output (every `YYYYMMDD` day directory under
+    > `raw/<year>` has a matching `YYYYMMDD.nc` under `concatenated/<year>`), the raw
+    > copy — and the downloaded source tars from step 5 — are not worth keeping
+    > alongside the consolidated one; delete them to reclaim disk. Re-deriving
+    > per-timestep data later means re-downloading and re-processing from CEDA.
+
 ---
 
 ## Compute All Layers
@@ -144,7 +161,10 @@ CEDA_TOKEN=your_token_here
     - Queries soil type from the SEARG API
     - Loads NIMROD rainfall from disk via `compute_rainfall`
     - _(optional)_ Fetches NDVI / NDWI from Sentinel-2 via openEO (`--skip-eo` to omit)
-    - Saves each fully-populated `Sample` to disk → `data/sample_instances/<notation>/`
+    - Saves each fully-populated `Sample` to disk → `data/sample_instances/<notation>_<sample_id>/`
+      (`<sample_id>` is the observation ID embedded in the source CSV/GPKG's `id` column —
+      `notation` alone identifies the *site*, not the observation, and the same site is
+      typically sampled on many different dates)
 
     `--nimrod-dir` accepts the raw per-timestep directory tree (step 6's output), the per-day consolidated directory tree (step 7's output), or a single `.nc` file covering an arbitrary range (e.g. a whole year merged with `ncrcat`) — consolidation is a speed optimisation, not a requirement.
 
@@ -183,7 +203,7 @@ Several scripts are the non-interactive equivalents of a notebook. The table bel
 | `delineate_catchment.py`        | `catchment_delineation.ipynb`       | Single-site walkthrough of the full delineation pipeline — pit filling, flow direction, accumulation, and polygon extraction                    |
 | `visualise_ea_samples.py`       | `environment_agency_api_demo.ipynb` | Interactive map of EA sampling locations with values colour-coded by determinand                                                                |
 | `visualise_dem.py`              | `topography.ipynb`                  | DEM rendered as a colour-coded raster overlay; elevation, slope, and aspect across the study area                                               |
-| `visualise_devon_catchments.py` | `catchment_delineation.ipynb`       | Delineated catchment polygons overlaid on the DEM and drainage network, with sample-point markers                                               |
+| `visualise_catchments.py`       | `catchment_delineation.ipynb`       | Delineated catchment polygons overlaid on the DEM and drainage network, with sample-point markers                                               |
 | `visualise_nimrod.py`           | `nimrod_viewer.ipynb`               | NIMROD radar rainfall data — single timestep or time-aggregated (mean/max/sum) — overlaid on a Leaflet map                                      |
 | `prepare_samples.py`            | `sample_demo.ipynb`                 | Full per-sample layer computation: terrain, soil type, NIMROD rainfall, and Sentinel-2 NDVI/NDWI via openEO                                     |
 | `full_sample_flow.py`           | `full_sample_flow.ipynb`            | End-to-end single-sample walkthrough from raw CSV to computed layers, feature extraction, and interactive + static visualisation                |

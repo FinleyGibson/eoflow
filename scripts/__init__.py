@@ -22,7 +22,7 @@ __all__ = [
     # Visualisation
     "visualise_dem",
     "visualise_ea_samples",
-    "visualise_devon_catchments",
+    "visualise_catchments",
     "visualise_nimrod",
     "full_sample_flow",
     # Utilities
