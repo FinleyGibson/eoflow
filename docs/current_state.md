@@ -147,12 +147,13 @@ calculated.
 `eoflow/rivers.py` queries OpenStreetMap's Overpass API for waterway `LineString`s within an
 area of interest (with retry/fallback across multiple Overpass endpoints), then builds a
 topological `networkx` graph — nodes at intersections and endpoints, edges as river segments
-with lengths (Haversine for geographic CRS). `notebooks/river_mask/` covers this plus an
-alternative river-mask source, HydroSHEDS, for comparison. Per `todo.md`, this exists to
-eventually support graph-aware modelling (flow-distance/directional weighting between a
-sample and upstream influences, rather than plain Euclidean distance) — a Graph Gaussian
-Process is the specific approach named there. **Not yet wired into the main
-delineation → features → model pipeline.**
+with lengths (Haversine for geographic CRS). `notebooks/script_development/graph_with_nodes.ipynb`
+and `river_graph_building.ipynb` cover this. Per `todo.md`, this exists to eventually support
+graph-aware modelling (flow-distance/directional weighting between a sample and upstream
+influences, rather than plain Euclidean distance) — a Graph Gaussian Process is the specific
+approach named there. **Not yet wired into the main delineation → features → model pipeline.**
+An earlier HydroSHEDS-based alternative and its exploratory notebooks were dropped from this
+branch as unused (OSM is the source actually used).
 
 ### 3.2 Live/current Met Office rainfall
 

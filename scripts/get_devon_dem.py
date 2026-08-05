@@ -3,7 +3,7 @@ Download a GeoTIFF Digital Elevation Model (DEM) clipped to the Devon county
 boundary from the `OpenTopography API <https://opentopography.org>`__.
 
 This script combines the DEM download approach from :mod:`scripts.get_dem`
-with the Devon shapefile loading from :mod:`scripts.get_devon_water_quality`
+with the Devon shapefile loading from :mod:`scripts.get_devon_shapefile`
 to produce a DEM that covers only the area inside the Devon county polygon.
 
 The workflow is:
@@ -78,7 +78,7 @@ from scripts.get_dem import (
 
 logger = get_logger(__file__)
 
-# Default shapefile path (same as get_devon_water_quality.py)
+# Default shapefile path (same as get_devon_shapefile.py)
 _DEFAULT_SHAPEFILE = Path(__file__).resolve().parent.parent / "data" / "devon_county"
 
 

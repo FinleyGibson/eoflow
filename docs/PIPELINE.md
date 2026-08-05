@@ -15,6 +15,8 @@ The two main source streams — EA water quality samples and NIMROD rainfall —
     > _Optional QA:_ `visualise_dem.py` — render the DEM as an interactive map to check coverage before proceeding
 
 - **Study-area shapefile** — a polygon boundary for your area of interest, used by `nimrod_process_local.py` (to crop rainfall) and `get_ea_water_quality_by_shapefile.py` (to filter samples). Administrative boundaries can be downloaded from the [ONS Open Geography Portal](https://geoportal.statistics.gov.uk/), or one has been provided for the East Devon case study area of interest.
+
+    > _Devon case study convenience:_ `get_devon_shapefile.py` extracts the Devon county boundary from an ONS "Counties and Unitary Authorities" download, and `get_devon_dem.py` combines that with `get_dem.py` to fetch a DEM pre-clipped to Devon — these produced the shapefile/DEM already present under `data/`.
 - **CEDA credentials** — a `CEDA_TOKEN` env var is required for NIMROD downloads (Stream B) and can be created at [ceda.ac.uk](https://accounts.ceda.ac.uk/realms/ceda/account/#/).
 - **Copernicus Data Space account** — a free account at [dataspace.copernicus.eu](https://dataspace.copernicus.eu) is required for Sentinel-2 EO data; authentication is via OIDC device-flow (interactive browser prompt) triggered automatically by `prepare_samples.py` unless `--skip-eo` is passed
 
